@@ -1,0 +1,26 @@
+# Dependencies and environments
+**/node_modules/
+**/.venv/
+.pnpm-store/
+
+# Framework/build outputs
+**/.next/
+**/dist/
+**/build/
+**/out/
+**/coverage/
+
+# Caches
+**/.pytest_cache/
+**/__pycache__/
+**/*.tsbuildinfo
+**/*.map
+
+tmp/
+
+# Version-control internals
+.git/
+
+# Secrets
+.env
+.env.*
