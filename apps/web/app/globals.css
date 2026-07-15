@@ -1,0 +1,125 @@
+@import "../tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.skip-link {
+  left: 1rem;
+  position: fixed;
+  top: -5rem;
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+.product-header {
+  align-items: center;
+  border-bottom: 1px solid var(--color-rule);
+  display: flex;
+  justify-content: space-between;
+  min-height: 4rem;
+  padding: 0 1.5rem;
+}
+
+.wordmark {
+  align-items: center;
+  display: inline-flex;
+  font-weight: 650;
+  gap: 0.6rem;
+  text-decoration: none;
+}
+
+.brand-tile {
+  align-items: center;
+  background: var(--color-accent);
+  border-radius: 0.35rem;
+  color: white;
+  display: inline-flex;
+  height: 1.75rem;
+  justify-content: center;
+  width: 1.75rem;
+}
+
+.connect {
+  display: grid;
+  min-height: calc(100vh - 4rem);
+  padding: 3rem 1.5rem;
+  place-items: start center;
+}
+
+.connect__panel {
+  background: var(--color-paper-raised);
+  border: 1px solid var(--color-rule);
+  border-radius: 0.75rem;
+  max-width: 38rem;
+  padding: 2rem;
+  width: 100%;
+}
+
+.connect__panel h1 {
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 6vw, 3rem);
+  line-height: 1.05;
+}
+
+.connect__panel form {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.connect__panel input {
+  border: 1px solid var(--color-rule);
+  border-radius: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.6rem 0.75rem;
+}
+
+.button {
+  align-items: center;
+  border: 1px solid var(--color-accent);
+  border-radius: 0.5rem;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0.6rem 1rem;
+  text-decoration: none;
+}
+
+.button--primary {
+  background: var(--color-accent);
+  color: white;
+}
+
+.micro-label {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 3px;
+}

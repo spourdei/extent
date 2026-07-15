@@ -12,12 +12,18 @@
     "apps/web"
   ],
   "scripts": {
+    "build": "pnpm --filter @extent/web build",
+    "dev": "pnpm --filter @extent/web dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "eslint . --max-warnings 0"
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "pnpm --filter @extent/web typecheck"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
     "eslint": "9.39.5",
     "eslint-plugin-react-hooks": "5.2.0",
     "prettier": "3.8.0",
