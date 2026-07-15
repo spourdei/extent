@@ -1,0 +1,557 @@
+"""Download and page-aware parsing contracts for real source evidence."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import re
+import zipfile
+from dataclasses import dataclass
+from io import BytesIO, StringIO
+from typing import Literal, Protocol
+from xml.etree import ElementTree
+
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
+
+DownloadErrorCode = Literal[
+    "inaccessible",
+    "not_found",
+    "provider_failure",
+    "rate_limited",
+]
+OcrErrorCode = Literal[
+    "ocr_engine_unavailable",
+    "ocr_no_text",
+    "ocr_recognition_failed",
+    "ocr_render_failed",
+    "ocr_timeout",
+]
+
+_PDF_FORM_FIELD_MARKER = re.compile(r"[ \t]*\{\{[0-9A-F]{6}\}\}[ \t]*")
+_DOCX_DOCUMENT_PATH = "word/document.xml"
+_DOCX_MAX_DOCUMENT_XML_BYTES = 20_000_000
+_WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+@dataclass(frozen=True)
+class BinaryDownloadRequest:
+    file_id: str
+    resource_key: str | None = None
+
+
+@dataclass(frozen=True)
+class TextExportRequest:
+    file_id: str
+    resource_key: str | None = None
+
+
+@dataclass(frozen=True)
+class BinaryDownloadSuccess:
+    content: bytes
+    status: Literal["ok"] = "ok"
+
+
+@dataclass(frozen=True)
+class BinaryDownloadError:
+    code: DownloadErrorCode
+    retryable: bool
+    status: Literal["error"] = "error"
+
+
+BinaryDownloadResponse = BinaryDownloadSuccess | BinaryDownloadError
+
+
+class SourceContentProvider(Protocol):
+    def download_binary(self, request: BinaryDownloadRequest) -> BinaryDownloadResponse: ...
+
+    def export_text(self, request: TextExportRequest) -> BinaryDownloadResponse: ...
+
+
+class PdfOcrProvider(Protocol):
+    def extract_pages(self, content: bytes) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True)
+class ParsedPdfBlock:
+    content_hash: str
+    normalized_end_exclusive: int
+    normalized_start: int
+    ordinal: int
+    page_index_zero_based: int
+    printed_page_label: str | None
+    text: str
+
+
+@dataclass(frozen=True)
+class ParsedPdf:
+    blocks: tuple[ParsedPdfBlock, ...]
+    content_hash: str
+    page_count: int
+    extraction_method: Literal["embedded_text", "ocr"] = "embedded_text"
+
+
+@dataclass(frozen=True)
+class ParsedTextBlock:
+    content_hash: str
+    line_start_one_based: int
+    normalized_end_exclusive: int
+    normalized_start: int
+    ordinal: int
+    text: str
+
+
+@dataclass(frozen=True)
+class ParsedTableRow:
+    line_start_one_based: int
+    ordinal: int
+    values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ParsedDocumentTable:
+    headers: tuple[str, ...]
+    malformed_rows: int
+    ordinal: int
+    rows: tuple[ParsedTableRow, ...]
+    section: str | None = None
+    title: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedText:
+    blocks: tuple[ParsedTextBlock, ...]
+    content_hash: str
+    tables: tuple[ParsedDocumentTable, ...] = ()
+
+
+class TextExtractionError(ValueError):
+    def __init__(
+        self,
+        code: Literal[
+            "docx_archive_too_large",
+            "invalid_csv",
+            "invalid_docx",
+            "invalid_encoding",
+            "no_text",
+        ],
+    ):
+        super().__init__(code)
+        self.code = code
+
+
+class PdfOcrError(RuntimeError):
+    def __init__(self, code: OcrErrorCode):
+        super().__init__(code)
+        self.code = code
+
+
+class PdfExtractionError(ValueError):
+    def __init__(
+        self,
+        code: Literal[
+            "encrypted_pdf",
+            "invalid_pdf",
+            "no_text",
+            "ocr_engine_unavailable",
+            "ocr_no_text",
+            "ocr_recognition_failed",
+            "ocr_render_failed",
+            "ocr_timeout",
+        ],
+    ):
+        super().__init__(code)
+        self.code = code
+
+
+def parse_text_pdf(
+    content: bytes,
+    *,
+    max_block_chars: int = 1_800,
+) -> ParsedPdf:
+    """Extract page text into exact, reversible page-relative blocks."""
+
+    reader = _read_pdf(content)
+    labels = reader.page_labels
+    pages: list[str] = []
+    for page in reader.pages:
+        try:
+            extracted = page.extract_text()
+        except (PdfReadError, KeyError, TypeError, ValueError) as error:
+            raise PdfExtractionError("invalid_pdf") from error
+        pages.append(extracted or "")
+    parsed = _parsed_pdf(
+        content,
+        page_texts=pages,
+        page_labels=labels,
+        extraction_method="embedded_text",
+        max_block_chars=max_block_chars,
+    )
+    if not parsed.blocks:
+        raise PdfExtractionError("no_text")
+    return parsed
+
+
+def parse_ocr_pdf(
+    content: bytes,
+    *,
+    provider: PdfOcrProvider,
+    max_block_chars: int = 1_800,
+) -> ParsedPdf:
+    """Extract OCR-derived, page-relative blocks after embedded text is unavailable."""
+
+    reader = _read_pdf(content)
+    try:
+        pages = provider.extract_pages(content)
+    except PdfOcrError as error:
+        raise PdfExtractionError(error.code) from error
+    if len(pages) != len(reader.pages):
+        raise PdfExtractionError("ocr_recognition_failed")
+    parsed = _parsed_pdf(
+        content,
+        page_texts=pages,
+        page_labels=reader.page_labels,
+        extraction_method="ocr",
+        max_block_chars=max_block_chars,
+    )
+    if not parsed.blocks:
+        raise PdfExtractionError("ocr_no_text")
+    return parsed
+
+
+def _read_pdf(content: bytes) -> PdfReader:
+    try:
+        reader = PdfReader(BytesIO(content), strict=False)
+    except (PdfReadError, OSError, ValueError) as error:
+        raise PdfExtractionError("invalid_pdf") from error
+    if reader.is_encrypted:
+        raise PdfExtractionError("encrypted_pdf")
+    return reader
+
+
+def _parsed_pdf(
+    content: bytes,
+    *,
+    page_texts: list[str] | tuple[str, ...],
+    page_labels: list[str],
+    extraction_method: Literal["embedded_text", "ocr"],
+    max_block_chars: int,
+) -> ParsedPdf:
+    blocks: list[ParsedPdfBlock] = []
+    ordinal = 0
+    for page_index, extracted in enumerate(page_texts):
+        normalized = _normalize_pdf_text(extracted)
+        if not normalized:
+            continue
+        label = (
+            page_labels[page_index] if page_index < len(page_labels) else str(page_index + 1)
+        )
+        for start, end, text in _bounded_text_blocks(normalized, max_block_chars):
+            blocks.append(
+                ParsedPdfBlock(
+                    content_hash=hashlib.sha256(text.encode()).hexdigest(),
+                    normalized_end_exclusive=end,
+                    normalized_start=start,
+                    ordinal=ordinal,
+                    page_index_zero_based=page_index,
+                    printed_page_label=label,
+                    text=text,
+                )
+            )
+            ordinal += 1
+    return ParsedPdf(
+        blocks=tuple(blocks),
+        content_hash=hashlib.sha256(content).hexdigest(),
+        page_count=len(page_texts),
+        extraction_method=extraction_method,
+    )
+
+
+def parse_plain_text(content: bytes, *, max_block_chars: int = 1_800) -> ParsedText:
+    """Decode UTF-8 text into exact blocks addressable by normalized line number."""
+
+    decoded = _decode_utf8(content)
+    normalized = _normalize_page_text(decoded)
+    if not normalized:
+        raise TextExtractionError("no_text")
+    return _parsed_text(normalized, content=content, max_block_chars=max_block_chars)
+
+
+def parse_csv(content: bytes, *, max_block_chars: int = 1_800) -> ParsedText:
+    """Parse RFC 4180-style comma-separated records into stable row-addressable text."""
+
+    decoded = _decode_utf8(content)
+    try:
+        rows = csv.reader(StringIO(decoded, newline=""), dialect="excel", strict=True)
+        cell_rows = [tuple(_normalize_structured_cell(cell) for cell in row) for row in rows]
+    except csv.Error as error:
+        raise TextExtractionError("invalid_csv") from error
+    cell_rows = [row for row in cell_rows if any(cell for cell in row)]
+    normalized = "\n".join("\t".join(row) for row in cell_rows)
+    if not normalized:
+        raise TextExtractionError("no_text")
+    tables: tuple[ParsedDocumentTable, ...] = ()
+    if len(cell_rows) >= 2 and len(cell_rows[0]) >= 2:
+        headers = cell_rows[0]
+        tables = (
+            ParsedDocumentTable(
+                headers=headers,
+                malformed_rows=sum(len(row) != len(headers) for row in cell_rows[1:]),
+                ordinal=1,
+                rows=tuple(
+                    ParsedTableRow(
+                        line_start_one_based=index + 1,
+                        ordinal=index,
+                        values=row,
+                    )
+                    for index, row in enumerate(cell_rows[1:], start=1)
+                    if len(row) == len(headers)
+                ),
+            ),
+        )
+    return _parsed_text(
+        normalized,
+        content=content,
+        max_block_chars=max_block_chars,
+        tables=tables,
+    )
+
+
+def parse_docx(content: bytes, *, max_block_chars: int = 1_800) -> ParsedText:
+    """Extract DOCX body paragraphs and table rows in document order."""
+
+    document_xml = _read_docx_document_xml(content)
+    if b"<!DOCTYPE" in document_xml.upper() or b"<!ENTITY" in document_xml.upper():
+        raise TextExtractionError("invalid_docx")
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as error:
+        raise TextExtractionError("invalid_docx") from error
+    body = root.find(f".//{_word_tag('body')}")
+    if body is None:
+        raise TextExtractionError("invalid_docx")
+    lines: list[str] = []
+    tables: list[ParsedDocumentTable] = []
+    current_section: str | None = None
+    previous_paragraph: str | None = None
+    for child in body:
+        if child.tag == _word_tag("p"):
+            paragraph = _docx_paragraph_text(child)
+            if paragraph:
+                lines.append(paragraph)
+                previous_paragraph = paragraph
+                if _docx_paragraph_is_heading(child):
+                    current_section = paragraph
+        elif child.tag == _word_tag("tbl"):
+            table_rows = _docx_table_rows(child)
+            table_line_start = len(lines) + 1
+            lines.extend(table_rows)
+            split_rows = [tuple(row.split("\t")) for row in table_rows]
+            if len(split_rows) >= 2 and len(split_rows[0]) >= 2:
+                headers = split_rows[0]
+                tables.append(
+                    ParsedDocumentTable(
+                        headers=headers,
+                        malformed_rows=sum(len(row) != len(headers) for row in split_rows[1:]),
+                        ordinal=len(tables) + 1,
+                        rows=tuple(
+                            ParsedTableRow(
+                                line_start_one_based=table_line_start + index,
+                                ordinal=index,
+                                values=row,
+                            )
+                            for index, row in enumerate(split_rows[1:], start=1)
+                            if len(row) == len(headers)
+                        ),
+                        section=current_section,
+                        title=previous_paragraph,
+                    )
+                )
+    normalized = _normalize_page_text("\n".join(lines))
+    if not normalized:
+        raise TextExtractionError("no_text")
+    return _parsed_text(
+        normalized,
+        content=content,
+        max_block_chars=max_block_chars,
+        tables=tuple(tables),
+    )
+
+
+def _decode_utf8(content: bytes) -> str:
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise TextExtractionError("invalid_encoding") from error
+
+
+def _normalize_structured_cell(value: str) -> str:
+    return re.sub(r"[\t\r\n ]+", " ", value.replace("\x00", "")).strip()
+
+
+def _read_docx_document_xml(content: bytes) -> bytes:
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            try:
+                document = archive.getinfo(_DOCX_DOCUMENT_PATH)
+            except KeyError as error:
+                raise TextExtractionError("invalid_docx") from error
+            if document.is_dir() or document.file_size > _DOCX_MAX_DOCUMENT_XML_BYTES:
+                raise TextExtractionError("docx_archive_too_large")
+            with archive.open(document) as stream:
+                document_xml = stream.read(_DOCX_MAX_DOCUMENT_XML_BYTES + 1)
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+        raise TextExtractionError("invalid_docx") from error
+    if len(document_xml) > _DOCX_MAX_DOCUMENT_XML_BYTES:
+        raise TextExtractionError("docx_archive_too_large")
+    return document_xml
+
+
+def _docx_table_rows(table: ElementTree.Element) -> list[str]:
+    rows: list[str] = []
+    for row in table.findall(f".//{_word_tag('tr')}"):
+        cells = [
+            " ".join(
+                text
+                for paragraph in cell.findall(f".//{_word_tag('p')}")
+                if (text := _docx_paragraph_text(paragraph))
+            )
+            for cell in row.findall(f"./{_word_tag('tc')}")
+        ]
+        normalized = "\t".join(cells).rstrip()
+        if normalized.strip():
+            rows.append(normalized)
+    return rows
+
+
+def _docx_paragraph_text(paragraph: ElementTree.Element) -> str:
+    parts: list[str] = []
+    for node in paragraph.iter():
+        if node.tag == _word_tag("t"):
+            parts.append(node.text or "")
+        elif node.tag == _word_tag("tab"):
+            parts.append("\t")
+        elif node.tag in {_word_tag("br"), _word_tag("cr")}:
+            parts.append("\n")
+        elif node.tag == _word_tag("noBreakHyphen"):
+            parts.append("-")
+    return _normalize_structured_cell("".join(parts))
+
+
+def _docx_paragraph_is_heading(paragraph: ElementTree.Element) -> bool:
+    style = paragraph.find(f"./{_word_tag('pPr')}/{_word_tag('pStyle')}")
+    if style is None:
+        return False
+    value = style.get(_word_tag("val"), "")
+    return value.casefold().startswith("heading")
+
+
+def _word_tag(local_name: str) -> str:
+    return f"{{{_WORD_NAMESPACE}}}{local_name}"
+
+
+def _parsed_text(
+    normalized: str,
+    *,
+    content: bytes,
+    max_block_chars: int,
+    tables: tuple[ParsedDocumentTable, ...] = (),
+) -> ParsedText:
+    block_ranges = (
+        _bounded_line_blocks(normalized, max_block_chars)
+        if tables
+        else _bounded_text_blocks(normalized, max_block_chars)
+    )
+    blocks = tuple(
+        ParsedTextBlock(
+            content_hash=hashlib.sha256(text.encode()).hexdigest(),
+            line_start_one_based=1 + normalized.count("\n", 0, start),
+            normalized_end_exclusive=end,
+            normalized_start=start,
+            ordinal=ordinal,
+            text=text,
+        )
+        for ordinal, (start, end, text) in enumerate(block_ranges)
+    )
+    return ParsedText(
+        blocks=blocks,
+        content_hash=hashlib.sha256(content).hexdigest(),
+        tables=tables,
+    )
+
+
+def _normalize_page_text(value: str) -> str:
+    value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    value = "\n".join(line.rstrip() for line in value.split("\n"))
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def _normalize_pdf_text(value: str) -> str:
+    without_form_markers = _PDF_FORM_FIELD_MARKER.sub(" ", value)
+    return _normalize_page_text(without_form_markers)
+
+
+def _bounded_text_blocks(value: str, limit: int) -> list[tuple[int, int, str]]:
+    if limit < 200:
+        raise ValueError("PDF block limit is too small")
+    blocks: list[tuple[int, int, str]] = []
+    cursor = 0
+    while cursor < len(value):
+        end = min(cursor + limit, len(value))
+        if end < len(value):
+            search_floor = cursor + limit // 2
+            candidates = [
+                value.rfind("\n\n", search_floor, end),
+                value.rfind("\n", search_floor, end),
+                value.rfind(" ", search_floor, end),
+            ]
+            boundary = max(candidates)
+            if boundary > cursor:
+                end = boundary
+        raw = value[cursor:end]
+        leading = len(raw) - len(raw.lstrip())
+        trailing = len(raw.rstrip())
+        start = cursor + leading
+        trimmed_end = cursor + trailing
+        if trimmed_end > start:
+            blocks.append((start, trimmed_end, value[start:trimmed_end]))
+        cursor = end
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+    return blocks
+
+
+def _bounded_line_blocks(value: str, limit: int) -> list[tuple[int, int, str]]:
+    """Chunk structured text without splitting a source row across blocks.
+
+    Complete table artifacts retain row-level provenance by normalized line
+    number. A block boundary inside a row makes that row impossible to cite
+    exactly, so a single unusually long row is allowed to exceed the preferred
+    block size instead of being silently omitted from later analysis.
+    """
+
+    if limit < 200:
+        raise ValueError("text block limit is too small")
+    blocks: list[tuple[int, int, str]] = []
+    cursor = 0
+    while cursor < len(value):
+        preferred_end = min(cursor + limit, len(value))
+        if preferred_end == len(value):
+            end = preferred_end
+        else:
+            end = value.rfind("\n", cursor, preferred_end + 1)
+            if end <= cursor:
+                following_line_end = value.find("\n", preferred_end)
+                end = len(value) if following_line_end < 0 else following_line_end
+        raw = value[cursor:end]
+        leading = len(raw) - len(raw.lstrip())
+        trailing = len(raw.rstrip())
+        start = cursor + leading
+        trimmed_end = cursor + trailing
+        if trimmed_end > start:
+            blocks.append((start, trimmed_end, value[start:trimmed_end]))
+        cursor = end
+        while cursor < len(value) and value[cursor] == "\n":
+            cursor += 1
+    return blocks
