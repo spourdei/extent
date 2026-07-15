@@ -9,7 +9,11 @@ description = "FastAPI backend authority for the Extent evidence desk."
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.18,<2",
+  "cryptography>=46,<47",
   "fastapi>=0.116,<1",
+  "google-api-python-client>=2.198,<3",
+  "google-auth>=2.56,<3",
+  "google-auth-oauthlib>=1.4,<2",
   "pgvector>=0.5,<1",
   "psycopg[binary]>=3.3,<4",
   "pydantic-settings>=2.10,<3",
