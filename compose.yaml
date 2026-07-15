@@ -1,0 +1,39 @@
+name: extent
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: ${EXTENT_POSTGRES_DB:-extent}
+      POSTGRES_PASSWORD: ${EXTENT_POSTGRES_PASSWORD:-extent}
+      POSTGRES_USER: ${EXTENT_POSTGRES_USER:-extent}
+    ports:
+      - "${EXTENT_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${EXTENT_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:
