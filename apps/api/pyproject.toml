@@ -28,12 +28,23 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "httpx2>=2.7,<3",
   "mypy>=1.16,<2",
+  "pytest>=8.4,<10",
   "ruff>=0.12,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/extent_api"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+  "live: opt-in smoke against configured external model providers",
+  "postgres: requires a live disposable Postgres database",
+]
 
 [tool.ruff]
 line-length = 96
@@ -45,6 +56,7 @@ select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+plugins = ["pydantic.mypy"]
 files = ["src"]
 
 [[tool.mypy.overrides]]

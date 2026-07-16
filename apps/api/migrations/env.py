@@ -1,20 +1,29 @@
-"""Alembic runtime for the initial schema."""
+"""Alembic runtime configured from the validated application environment."""
 
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from extent_api.config import get_settings
+from extent_api.database import models as identity_models
 from extent_api.database.base import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+if config.get_main_option("sqlalchemy.url") is None:
+    config.set_main_option(
+        "sqlalchemy.url", get_settings().migration_database_url.replace("%", "%%")
+    )
 target_metadata = Base.metadata
+_MODELS_IMPORTED = identity_models
 
 
 def run_migrations_offline() -> None:
+    """Emit deterministic SQL without requiring a database connection."""
+
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
@@ -27,6 +36,8 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    """Apply migrations transactionally through psycopg."""
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -34,9 +45,7 @@ def run_migrations_online() -> None:
     )
     with connectable.connect() as connection:
         context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
+            connection=connection, target_metadata=target_metadata, compare_type=True
         )
         with context.begin_transaction():
             context.run_migrations()
