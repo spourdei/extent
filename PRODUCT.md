@@ -29,6 +29,16 @@ failed. A partially prepared folder should not look complete.
 The first useful release can focus on one folder per workspace and bounded answers. It does
 not need a general-purpose chat surface.
 
+## Complete-set questions
+
+Some questions ask for every matching row or value, not the best few passages. Detect that
+scope before ordinary ranked retrieval. Complete-set answers must use a bounded,
+deterministic extraction pass and say when file coverage prevents a complete result.
+
+CSV records and document bodies need stable locators just like PDF pages and text lines.
+If a request is too broad for the supported extraction shape, ask for a narrower subject or
+field instead of implying completeness.
+
 ## Open questions
 
 - How should conflicts between plausible source values appear?
