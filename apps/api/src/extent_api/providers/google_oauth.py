@@ -17,24 +17,18 @@ from oauthlib.oauth2 import (  # type: ignore[import-untyped]
 )
 
 GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
-GOOGLE_USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
-GOOGLE_USERINFO_PROFILE_SCOPE = "https://www.googleapis.com/auth/userinfo.profile"
 GOOGLE_OAUTH_SCOPES = ("openid", "email", "profile", GOOGLE_DRIVE_READONLY_SCOPE)
 
 
 def missing_required_google_scopes(scopes: frozenset[str] | set[str]) -> frozenset[str]:
-    """Return missing capabilities while treating Google's OIDC aliases as equivalent."""
+    """Return missing provider permissions required after identity verification."""
 
-    missing: set[str] = set()
-    if "openid" not in scopes:
-        missing.add("openid")
-    if GOOGLE_DRIVE_READONLY_SCOPE not in scopes:
-        missing.add(GOOGLE_DRIVE_READONLY_SCOPE)
-    if not {"email", GOOGLE_USERINFO_EMAIL_SCOPE} & scopes:
-        missing.add("email")
-    if not {"profile", GOOGLE_USERINFO_PROFILE_SCOPE} & scopes:
-        missing.add("profile")
-    return frozenset(missing)
+    # Google can report OIDC identity scopes differently across the initial grant
+    # and later grants. Identity authority comes from the verified ID token and its
+    # required claims below; the scope grant only needs to prove Drive capability.
+    if GOOGLE_DRIVE_READONLY_SCOPE in scopes:
+        return frozenset()
+    return frozenset({GOOGLE_DRIVE_READONLY_SCOPE})
 
 
 class GoogleOAuthError(RuntimeError):

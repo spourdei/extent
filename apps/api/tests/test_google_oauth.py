@@ -5,9 +5,11 @@ from collections.abc import Sequence
 import pytest
 
 from extent_api.providers.google_oauth import (
+    GOOGLE_DRIVE_READONLY_SCOPE,
     GOOGLE_OAUTH_SCOPES,
     GoogleOAuthError,
     GoogleOAuthProvider,
+    missing_required_google_scopes,
 )
 
 
@@ -65,3 +67,13 @@ def test_exchange_rejects_explicitly_empty_scope_grant(
 
     assert captured.value.stage == "token_response"
     assert captured.value.reason == "granted_scopes_missing"
+
+
+def test_required_scope_validation_uses_verified_id_token_for_identity() -> None:
+    assert missing_required_google_scopes({GOOGLE_DRIVE_READONLY_SCOPE}) == frozenset()
+
+
+def test_required_scope_validation_still_requires_drive_access() -> None:
+    assert missing_required_google_scopes({"openid", "email", "profile"}) == frozenset(
+        {GOOGLE_DRIVE_READONLY_SCOPE}
+    )
