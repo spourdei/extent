@@ -9,7 +9,7 @@ export default function SampleLoading() {
           <span aria-hidden="true" className="busy-dot" />
           <div>
             <h1>Opening the prepared sample</h1>
-            <p>Loading the prepared fictional documents and their findings.</p>
+            <p>Loading the public Alder Peak packet and its prepared finding.</p>
           </div>
         </div>
       </main>

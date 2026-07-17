@@ -28,6 +28,7 @@ export class ApiRequestError extends Error {
 async function request(
   path: string,
   init: RequestInit = {},
+  timeoutMs: number = requestTimeoutMs,
 ): Promise<{ body: unknown; response: Response }> {
   const controller = new AbortController();
   const timeoutError = new ApiRequestError(
@@ -41,7 +42,7 @@ async function request(
   else init.signal?.addEventListener("abort", abortFromCaller, { once: true });
   const deadline = globalThis.setTimeout(() => {
     controller.abort(timeoutError);
-  }, requestTimeoutMs);
+  }, timeoutMs);
 
   try {
     const headers = new Headers(init.headers);
@@ -209,6 +210,35 @@ export async function askWorkspace(
       response,
       "question_failed",
       "Extent could not complete this question.",
+    );
+  }
+  const result = readQuestionResult(body);
+  if (result === null) throw invalidResponse("question_response_invalid");
+  return result;
+}
+
+export async function askDemoQuestion(
+  question: string,
+  idempotencyKey: string,
+): Promise<QuestionResult> {
+  const { body, response } = await request(
+    "/api/backend/v1/demo/questions",
+    {
+      body: JSON.stringify({ question }),
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      method: "POST",
+    },
+    60_000,
+  );
+  if (!response.ok) {
+    throw responseError(
+      body,
+      response,
+      "question_failed",
+      "Extent could not complete this sample question.",
     );
   }
   const result = readQuestionResult(body);

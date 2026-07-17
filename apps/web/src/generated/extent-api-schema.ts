@@ -1864,12 +1864,28 @@ export const extentApiSchema = {
             "title": "Observedat",
             "type": "string"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "selected": {
             "title": "Selected",
             "type": "boolean"
           },
           "status": {
-            "const": "ready",
+            "enum": [
+              "ready",
+              "unsupported"
+            ],
             "title": "Status",
             "type": "string"
           }
@@ -2275,7 +2291,91 @@ export const extentApiSchema = {
             "description": "Successful Response"
           }
         },
-        "summary": "Read the immutable landing-page sample",
+        "summary": "Read the prepared Alder Peak landing-page sample",
+        "tags": [
+          "demo"
+        ]
+      }
+    },
+    "/api/v1/demo/questions": {
+      "post": {
+        "operationId": "ask_demo_question",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskWorkspaceQuestionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceQuestionResultView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceErrorView"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceErrorView"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceErrorView"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Ask an anonymous question about the prepared sample",
         "tags": [
           "demo"
         ]
@@ -2324,7 +2424,7 @@ export const extentApiSchema = {
             "description": "Validation Error"
           }
         },
-        "summary": "Read the interactive sample workspace",
+        "summary": "Read the interactive Alder Peak sample workspace",
         "tags": [
           "demo"
         ]

@@ -178,6 +178,7 @@ class QueryRepository:
             "invalid_csv",
             "invalid_docx",
             "invalid_encoding",
+            "invalid_xlsx",
             "invalid_pdf",
             "no_text",
             "ocr_no_text",

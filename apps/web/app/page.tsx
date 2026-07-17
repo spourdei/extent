@@ -50,7 +50,7 @@ export default async function HomePage() {
               </Link>
             </div>
             <p className="intro__disclosure">
-              The sample uses a prepared set of fictional documents. No sign-in or Drive
+              The public Alder Peak renewal sample is fully interactive. No sign-in or Drive
               access is needed.
             </p>
           </section>
@@ -60,7 +60,7 @@ export default async function HomePage() {
             aria-label="Example finding and source evidence"
           >
             <div className="intro__finding">
-              <p className="micro-label">Prepared fictional sample</p>
+              <p className="micro-label">Public interactive sample</p>
               <h2>{sampleQuestion.title}</h2>
               <p className="status-text status-text--success">
                 {sampleQuestion.stateLabel}

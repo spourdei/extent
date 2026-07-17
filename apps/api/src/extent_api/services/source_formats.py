@@ -8,10 +8,11 @@ from typing import Literal, assert_never
 
 GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
 DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PDF_MIME_TYPE = "application/pdf"
 CSV_MIME_TYPES = ("application/csv", "text/csv")
 
-ParserKind = Literal["csv", "docx", "pdf", "plain_text"]
+ParserKind = Literal["csv", "docx", "pdf", "plain_text", "xlsx"]
 PipelineVersion = Literal[
     "csv-record-v1",
     "csv-record-v2",
@@ -20,6 +21,7 @@ PipelineVersion = Literal[
     "pdf-ocr-page-v1",
     "pdf-page-v1",
     "plain-text-line-v1",
+    "xlsx-sheet-v1",
 ]
 PdfExtractionMethod = Literal["embedded_text", "ocr"]
 IngestionMode = Literal["download_binary", "download_text", "export_text"]
@@ -50,6 +52,8 @@ def pipeline_version_for(parser_kind: ParserKind) -> PipelineVersion:
             return "pdf-page-v1"
         case "plain_text":
             return "plain-text-line-v1"
+        case "xlsx":
+            return "xlsx-sheet-v1"
         case unreachable:
             assert_never(unreachable)
 
@@ -79,12 +83,14 @@ _FORMAT_REGISTRY: dict[str, tuple[ParserKind, IngestionMode, frozenset[str]]] = 
         "download_text",
         frozenset({"", ".md", ".markdown", ".mdown"}),
     ),
+    XLSX_MIME_TYPE: ("xlsx", "download_binary", frozenset({"", ".xlsx"})),
 }
 
 NON_PDF_INGESTION_MIME_TYPES = (
     *CSV_MIME_TYPES,
     DOCX_MIME_TYPE,
     GOOGLE_DOC_MIME_TYPE,
+    XLSX_MIME_TYPE,
     "text/plain",
     "text/markdown",
 )

@@ -63,10 +63,27 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** Read the immutable landing-page sample */
+        /** Read the prepared Alder Peak landing-page sample */
         readonly get: operations["get_demo_preview"];
         readonly put?: never;
         readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/demo/questions": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /** Ask an anonymous question about the prepared sample */
+        readonly post: operations["ask_demo_question"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -80,7 +97,7 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** Read the interactive sample workspace */
+        /** Read the interactive Alder Peak sample workspace */
         readonly get: operations["get_demo_workspace"];
         readonly put?: never;
         readonly post?: never;
@@ -846,13 +863,15 @@ export interface components {
              * Format: date-time
              */
             readonly observedAt: string;
+            /** Reason */
+            readonly reason?: string | null;
             /** Selected */
             readonly selected: boolean;
             /**
              * Status
-             * @constant
+             * @enum {string}
              */
-            readonly status: "ready";
+            readonly status: "ready" | "unsupported";
         };
         /** WorkspaceSourceView */
         readonly WorkspaceSourceView: {
@@ -1040,6 +1059,68 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["SampleWorkspaceProjection"];
+                };
+            };
+        };
+    };
+    readonly ask_demo_question: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                readonly "Idempotency-Key": string;
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["AskWorkspaceQuestionRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Successful Response */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkspaceQuestionResultView"];
+                };
+            };
+            /** @description Forbidden */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkspaceErrorView"];
+                };
+            };
+            /** @description Validation Error */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            readonly 429: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkspaceErrorView"];
+                };
+            };
+            /** @description Service Unavailable */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["WorkspaceErrorView"];
                 };
             };
         };

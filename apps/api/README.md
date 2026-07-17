@@ -40,10 +40,12 @@ discovered source manifest before admitting supported files. It then commits dow
 artifacts, embedding, and ready transitions while projecting them into the bounded public
 queued, parsing, ready, failed, unsupported, and capped states. It extracts embedded PDF text and
 falls back to local, page-aware Tesseract OCR for image-only PDFs, exports Google Docs to plain
-text, parses comma-separated UTF-8 CSV rows, extracts DOCX body paragraphs and tables, and
-downloads plain text or Markdown without an application-level file-size limit. PDF page count is
-also uncapped for scalability testing. DOCX `document.xml` is capped at 20,000,000 uncompressed
-bytes to bound ZIP/XML parser memory. CSV rows remain searchable, while deterministic
+text, parses comma-separated UTF-8 CSV rows, extracts DOCX body paragraphs and tables, parses
+bounded XLSX worksheets, and downloads plain text or Markdown without an application-level
+file-size limit. PDF page count is also uncapped for scalability testing. DOCX `document.xml` is
+capped at 20,000,000 uncompressed bytes to bound ZIP/XML parser memory. XLSX archives are capped
+at 20 sheets, 10,000 rows per sheet, 200 columns, and 50,000,000 total uncompressed bytes. CSV and
+XLSX rows remain searchable, while deterministic
 complete-list extraction marks undivided header grids ambiguous instead of guessing that the
 first row defines columns. The worker
 still persists at most 1,500 evidence blocks across one ingestion run. It persists hashed page- or line-relative evidence

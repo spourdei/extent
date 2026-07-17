@@ -12,7 +12,7 @@ behind each finding. Extent also shows when sources disagree or files could not 
 - Shows a small set of findings tied to exact quotes, files, pages, or lines
 - Keeps different supported values visible when sources disagree
 - States when unavailable files prevent a firm folder-wide answer
-- Includes a prepared fictional sample that needs no sign-in or Drive access
+- Includes a prepared, interactive fictional sample that needs no sign-in or Drive access
 
 Extent helps an analyst or operator find and compare relevant passages. It does not decide
 which document has legal or business authority. A quote shows what a source says, not whether the
@@ -60,10 +60,12 @@ cp .env.example .env
 `pnpm setup:api` creates `.venv`, installs the pinned Python requirements, and installs the API
 package in editable mode.
 
-### Open the prepared sample
+### Open the prepared interactive sample
 
-The prepared fictional sample does not require Docker, Postgres, Redis, Google credentials, or
-model credentials.
+The initial Alder Peak finding does not require Google credentials or a model. Start Redis with
+`pnpm infra:up` and configure `EXTENT_MODEL_API_KEY` to ask arbitrary sample questions and receive
+generated, citation-checked answers. Without a model key, Extent still returns the relevant exact
+passages.
 
 Start the API and web app in separate terminals:
 
@@ -280,11 +282,12 @@ rules.
 | Area                  | Current behavior                                                           |
 | --------------------- | -------------------------------------------------------------------------- |
 | Google Drive          | One folder, visible subfolders, and read-only access                       |
-| File types            | PDF, Google Docs, DOCX, comma-separated UTF-8 CSV, TXT, and Markdown       |
+| File types            | PDF, Google Docs, DOCX, XLSX, comma-separated UTF-8 CSV, TXT, and Markdown |
 | PDF text              | Embedded text first, then page-aware OCR when no usable text is found      |
 | Folder depth          | Up to 5 nested levels                                                      |
 | Stored passages       | Up to 1,500 across one folder-reading run                                  |
 | DOCX                  | Body paragraphs and tables, with `document.xml` capped at 20,000,000 bytes |
+| XLSX                  | Up to 20 sheets, 10,000 rows per sheet, and 200 columns                    |
 | Complete-list results | Up to 200 distinct rows before a visible overflow failure                  |
 | Questions             | 12 authenticated attempts per user per UTC minute by default               |
 | Worker attempts       | Initial execution plus 2 retries                                           |

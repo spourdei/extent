@@ -544,7 +544,13 @@ class QueryService:
                 return project_question_result(stored)
         if query_plan.mode == "direct" and any(
             candidate.pipeline_version
-            in {"csv-record-v1", "csv-record-v2", "docx-body-v1", "docx-body-v2"}
+            in {
+                "csv-record-v1",
+                "csv-record-v2",
+                "docx-body-v1",
+                "docx-body-v2",
+                "xlsx-sheet-v1",
+            }
             for candidate in candidates
         ):
             analysis = analyze_structured_question(

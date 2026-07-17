@@ -53,6 +53,7 @@ from extent_api.services.source_ingestion import (
     parse_ocr_pdf,
     parse_plain_text,
     parse_text_pdf,
+    parse_xlsx,
 )
 from extent_api.source_states import SourceFailureStage
 
@@ -362,6 +363,8 @@ def _parse_non_pdf_evidence(content: bytes, *, parser_kind: ParserKind) -> Parse
             return parse_docx(content)
         case "plain_text":
             return parse_plain_text(content)
+        case "xlsx":
+            return parse_xlsx(content)
         case "pdf":
             raise ValueError("PDF sources must use the page-aware parser path")
 

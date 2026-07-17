@@ -12,7 +12,7 @@ def main() -> None:
     config = Config(API_ROOT / "alembic.ini")
     scripts = ScriptDirectory.from_config(config)
     heads = scripts.get_heads()
-    if heads != ["20260717_0020"]:
+    if heads != ["20260717_0021"]:
         raise SystemExit(f"Expected one known migration head, received {heads!r}")
     if scripts.get_base() != "20260715_0001":
         raise SystemExit("The identity migration must remain the single baseline revision.")

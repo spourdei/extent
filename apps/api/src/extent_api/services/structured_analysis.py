@@ -278,7 +278,7 @@ def analyze_structured_question(
 
 
 def extract_structured_tables(blocks: list[RetrievedBlock]) -> tuple[StructuredTable, ...]:
-    """Reconstruct CSV, DOCX, and delimited document tables with row lineage."""
+    """Reconstruct CSV, DOCX, XLSX, and delimited document tables with row lineage."""
 
     by_source: dict[UUID, list[RetrievedBlock]] = {}
     for block in blocks:
@@ -302,7 +302,7 @@ def extract_structured_tables(blocks: list[RetrievedBlock]) -> tuple[StructuredT
             None,
         )
         is_csv = (
-            pipeline in {"csv-record-v1", "csv-record-v2"}
+            pipeline in {"csv-record-v1", "csv-record-v2", "xlsx-sheet-v1"}
             or PurePosixPath(source_blocks[0].source_name).suffix.casefold() == ".csv"
         )
         if is_csv:
@@ -361,7 +361,7 @@ def _tables_from_metadata(blocks: list[RetrievedBlock]) -> list[StructuredTable]
             continue
         pipeline_version = getattr(block, "pipeline_version", None)
         schema_version = metadata.get("schemaVersion")
-        if pipeline_version in {"csv-record-v2", "docx-body-v2"} and (
+        if pipeline_version in {"csv-record-v2", "docx-body-v2", "xlsx-sheet-v1"} and (
             schema_version != "structured-table-artifact-v2"
             or metadata.get("parserVersion") != pipeline_version
             or metadata.get("sourceVersion") != getattr(block, "source_content_hash", None)

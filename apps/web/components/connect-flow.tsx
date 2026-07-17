@@ -330,7 +330,8 @@ function ConnectState({
           </Link>
         </div>
         <p className="connect-footnote">
-          The sample is fictional and prepared in advance. It is not a live Drive folder.
+          The Alder Peak sample is prepared in advance and supports public questions. It is
+          not connected to a visitor’s Drive account.
         </p>
       </div>
     </section>

@@ -231,7 +231,7 @@ class SourceFile(Base):
             "pipeline_version IS NULL OR pipeline_version IN "
             "('csv-record-v1', 'csv-record-v2', 'docx-body-v1', 'docx-body-v2', "
             "'pdf-ocr-page-v1', "
-            "'pdf-page-v1', 'plain-text-line-v1')",
+            "'pdf-page-v1', 'plain-text-line-v1', 'xlsx-sheet-v1')",
             name="known_pipeline_version",
         ),
         UniqueConstraint("run_id", "drive_file_id", name="run_drive_file"),
@@ -287,7 +287,7 @@ class SourceBlock(Base):
             "pipeline_version IS NULL OR pipeline_version IN "
             "('csv-record-v1', 'csv-record-v2', 'docx-body-v1', 'docx-body-v2', "
             "'pdf-ocr-page-v1', "
-            "'pdf-page-v1', 'plain-text-line-v1')",
+            "'pdf-page-v1', 'plain-text-line-v1', 'xlsx-sheet-v1')",
             name="known_pipeline_version",
         ),
         UniqueConstraint(

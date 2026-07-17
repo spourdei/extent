@@ -218,8 +218,8 @@ export function WorkspaceShell({
               ) : null}
               {mode === "sample" ? (
                 <div className="sample-disclosure">
-                  <strong>Prepared fictional sample</strong>
-                  <span>Not connected to Google Drive</span>
+                  <strong>Public interactive sample</strong>
+                  <span>Alder Peak renewal packet · no sign-in</span>
                 </div>
               ) : null}
               {processingTitle ? (
@@ -240,9 +240,7 @@ export function WorkspaceShell({
             </div>
           </div>
 
-          {mode === "sample" ? (
-            <SampleComposer />
-          ) : (
+          {onAsk ? (
             <Composer
               error={composerError}
               inputRef={inputRef}
@@ -255,6 +253,8 @@ export function WorkspaceShell({
               question={questionText}
               readyFiles={readyFiles}
             />
+          ) : (
+            <SampleComposer />
           )}
           <p aria-live="polite" className="visually-hidden" role="status">
             {announcement}
@@ -309,7 +309,7 @@ function WorkspaceHeader({
           <span>{coverageLabel}</span>
         </button>
         <span>
-          {mode === "sample" ? "Prepared fictional sample" : "Drive connected · read-only"}
+          {mode === "sample" ? "Public sample · no sign-in" : "Drive connected · read-only"}
         </span>
       </div>
     </header>
@@ -698,8 +698,8 @@ function SampleComposer() {
     <div className="composer-wrap">
       <div className="composer sample-composer">
         <p>
-          This is a fixed, prepared result. Connect Google Drive to ask questions about your
-          own folder.
+          This prepared result is temporarily read-only. Connect Google Drive to ask
+          questions about your own folder.
         </p>
         <Link className="button button--primary button--compact" href="/connect">
           Connect Google Drive

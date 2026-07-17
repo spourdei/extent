@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import posixpath
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import date, timedelta
 from io import BytesIO, StringIO
+from pathlib import PurePosixPath
 from typing import Literal, Protocol
 from xml.etree import ElementTree
 
@@ -32,6 +35,19 @@ _PDF_FORM_FIELD_MARKER = re.compile(r"[ \t]*\{\{[0-9A-F]{6}\}\}[ \t]*")
 _DOCX_DOCUMENT_PATH = "word/document.xml"
 _DOCX_MAX_DOCUMENT_XML_BYTES = 20_000_000
 _WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_SHEET_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_OFFICE_REL_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PACKAGE_REL_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XLSX_MAX_ARCHIVE_FILES = 200
+_XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES = 50_000_000
+_XLSX_MAX_PART_BYTES = 10_000_000
+_XLSX_MAX_SHEETS = 20
+_XLSX_MAX_ROWS_PER_SHEET = 10_000
+_XLSX_MAX_COLUMNS = 200
+_XLSX_CELL_REFERENCE = re.compile(r"^([A-Z]{1,3})[1-9]\d*$")
+_XLSX_BUILTIN_DATE_FORMAT_IDS = frozenset(
+    {*range(14, 23), *range(27, 37), *range(45, 48), *range(50, 59)}
+)
 
 
 @dataclass(frozen=True)
@@ -133,6 +149,7 @@ class TextExtractionError(ValueError):
             "invalid_csv",
             "invalid_docx",
             "invalid_encoding",
+            "invalid_xlsx",
             "no_text",
         ],
     ):
@@ -376,6 +393,285 @@ def parse_docx(content: bytes, *, max_block_chars: int = 1_800) -> ParsedText:
         max_block_chars=max_block_chars,
         tables=tuple(tables),
     )
+
+
+def parse_xlsx(content: bytes, *, max_block_chars: int = 1_800) -> ParsedText:
+    """Extract bounded XLSX worksheets into line- and table-addressable text."""
+
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            infos = archive.infolist()
+            if (
+                len(infos) > _XLSX_MAX_ARCHIVE_FILES
+                or sum(info.file_size for info in infos) > _XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES
+                or any(info.flag_bits & 0x1 for info in infos)
+            ):
+                raise TextExtractionError("invalid_xlsx")
+            for info in infos:
+                path = PurePosixPath(info.filename)
+                if path.is_absolute() or ".." in path.parts:
+                    raise TextExtractionError("invalid_xlsx")
+
+            workbook = _xlsx_xml(archive, "xl/workbook.xml")
+            workbook_properties = workbook.find(f"{{{_SHEET_NAMESPACE}}}workbookPr")
+            uses_1904_dates = workbook_properties is not None and workbook_properties.get(
+                "date1904", ""
+            ).casefold() in {"1", "true"}
+            relationships = _xlsx_relationships(archive)
+            shared_strings = _xlsx_shared_strings(archive)
+            style_formats = _xlsx_style_formats(archive)
+            sheets = workbook.findall(f".//{{{_SHEET_NAMESPACE}}}sheet")
+            if not sheets or len(sheets) > _XLSX_MAX_SHEETS:
+                raise TextExtractionError("invalid_xlsx")
+
+            lines: list[str] = []
+            tables: list[ParsedDocumentTable] = []
+            for sheet_ordinal, sheet in enumerate(sheets, start=1):
+                name = sheet.get("name", "").strip()
+                relationship_id = sheet.get(f"{{{_OFFICE_REL_NAMESPACE}}}id", "")
+                target = relationships.get(relationship_id)
+                if not name or target is None:
+                    raise TextExtractionError("invalid_xlsx")
+                sheet_root = _xlsx_xml(archive, target)
+                rendered_rows = _xlsx_rows(
+                    sheet_root,
+                    shared_strings=shared_strings,
+                    style_formats=style_formats,
+                    uses_1904_dates=uses_1904_dates,
+                )
+                if not rendered_rows:
+                    continue
+                lines.append(f"Sheet: {name}")
+                row_lines: list[tuple[int, tuple[str, ...]]] = []
+                for values in rendered_rows:
+                    line_number = len(lines) + 1
+                    lines.append("\t".join(values))
+                    row_lines.append((line_number, values))
+                header_position = next(
+                    (
+                        index
+                        for index, (_, values) in enumerate(row_lines)
+                        if len(values) >= 2 and sum(bool(value) for value in values) >= 2
+                    ),
+                    None,
+                )
+                if header_position is None:
+                    continue
+                _, headers = row_lines[header_position]
+                data_rows = [
+                    ParsedTableRow(
+                        line_start_one_based=line_number,
+                        ordinal=ordinal,
+                        values=values,
+                    )
+                    for ordinal, (line_number, values) in enumerate(
+                        row_lines[header_position + 1 :], start=1
+                    )
+                    if len(values) == len(headers) and any(values)
+                ]
+                if data_rows:
+                    tables.append(
+                        ParsedDocumentTable(
+                            headers=headers,
+                            malformed_rows=sum(
+                                len(values) != len(headers)
+                                for _, values in row_lines[header_position + 1 :]
+                                if any(values)
+                            ),
+                            ordinal=sheet_ordinal,
+                            rows=tuple(data_rows),
+                            section=name,
+                            title=(
+                                row_lines[0][1][0]
+                                if header_position > 0 and row_lines[0][1]
+                                else name
+                            ),
+                        )
+                    )
+    except TextExtractionError:
+        raise
+    except (KeyError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
+        raise TextExtractionError("invalid_xlsx") from error
+
+    normalized = _normalize_page_text("\n".join(lines))
+    if not normalized:
+        raise TextExtractionError("no_text")
+    return _parsed_text(
+        normalized,
+        content=content,
+        max_block_chars=max_block_chars,
+        tables=tuple(tables),
+    )
+
+
+def _xlsx_xml(archive: zipfile.ZipFile, name: str) -> ElementTree.Element:
+    try:
+        info = archive.getinfo(name)
+    except KeyError as error:
+        raise TextExtractionError("invalid_xlsx") from error
+    if info.is_dir() or info.file_size > _XLSX_MAX_PART_BYTES:
+        raise TextExtractionError("invalid_xlsx")
+    payload = archive.read(info)
+    if b"<!DOCTYPE" in payload.upper() or b"<!ENTITY" in payload.upper():
+        raise TextExtractionError("invalid_xlsx")
+    try:
+        return ElementTree.fromstring(payload)
+    except ElementTree.ParseError as error:
+        raise TextExtractionError("invalid_xlsx") from error
+
+
+def _xlsx_relationships(archive: zipfile.ZipFile) -> dict[str, str]:
+    root = _xlsx_xml(archive, "xl/_rels/workbook.xml.rels")
+    relationships: dict[str, str] = {}
+    for relationship in root.findall(f"{{{_PACKAGE_REL_NAMESPACE}}}Relationship"):
+        relationship_id = relationship.get("Id", "")
+        target = relationship.get("Target", "")
+        relationship_type = relationship.get("Type", "")
+        if target.startswith("/") or target.startswith("xl/"):
+            resolved_target = target.lstrip("/")
+        else:
+            resolved_target = f"xl/{target}"
+        normalized_target = posixpath.normpath(resolved_target)
+        path = PurePosixPath(normalized_target)
+        if (
+            not relationship_id
+            or relationship.get("TargetMode") == "External"
+            or not relationship_type.endswith("/worksheet")
+            or "\\" in target
+            or path.is_absolute()
+            or ".." in path.parts
+            or not normalized_target.startswith("xl/")
+        ):
+            continue
+        relationships[relationship_id] = normalized_target
+    return relationships
+
+
+def _xlsx_shared_strings(archive: zipfile.ZipFile) -> tuple[str, ...]:
+    try:
+        root = _xlsx_xml(archive, "xl/sharedStrings.xml")
+    except TextExtractionError:
+        return ()
+    return tuple(
+        _normalize_structured_cell(
+            "".join(text.text or "" for text in item.iter(f"{{{_SHEET_NAMESPACE}}}t"))
+        )
+        for item in root.findall(f"{{{_SHEET_NAMESPACE}}}si")
+    )
+
+
+def _xlsx_style_formats(archive: zipfile.ZipFile) -> tuple[str, ...]:
+    try:
+        root = _xlsx_xml(archive, "xl/styles.xml")
+    except TextExtractionError:
+        return ()
+    custom = {
+        item.get("numFmtId", ""): item.get("formatCode", "")
+        for item in root.findall(f".//{{{_SHEET_NAMESPACE}}}numFmt")
+    }
+    return tuple(
+        custom.get(
+            item.get("numFmtId", ""),
+            (
+                "builtin-date"
+                if item.get("numFmtId", "").isdigit()
+                and int(item.get("numFmtId", "")) in _XLSX_BUILTIN_DATE_FORMAT_IDS
+                else item.get("numFmtId", "")
+            ),
+        )
+        for item in root.findall(f".//{{{_SHEET_NAMESPACE}}}cellXfs/{{{_SHEET_NAMESPACE}}}xf")
+    )
+
+
+def _xlsx_rows(
+    root: ElementTree.Element,
+    *,
+    shared_strings: tuple[str, ...],
+    style_formats: tuple[str, ...],
+    uses_1904_dates: bool,
+) -> tuple[tuple[str, ...], ...]:
+    rows: list[tuple[str, ...]] = []
+    for row in root.findall(f".//{{{_SHEET_NAMESPACE}}}sheetData/{{{_SHEET_NAMESPACE}}}row"):
+        if len(rows) >= _XLSX_MAX_ROWS_PER_SHEET:
+            raise TextExtractionError("invalid_xlsx")
+        cells: dict[int, str] = {}
+        for cell in row.findall(f"{{{_SHEET_NAMESPACE}}}c"):
+            reference = cell.get("r", "")
+            matched = _XLSX_CELL_REFERENCE.fullmatch(reference)
+            if matched is None:
+                raise TextExtractionError("invalid_xlsx")
+            column = _xlsx_column_index(matched.group(1))
+            if column >= _XLSX_MAX_COLUMNS:
+                raise TextExtractionError("invalid_xlsx")
+            cells[column] = _xlsx_cell_value(
+                cell,
+                shared_strings=shared_strings,
+                style_formats=style_formats,
+                uses_1904_dates=uses_1904_dates,
+            )
+        if not cells or not any(cells.values()):
+            continue
+        last_column = max(cells)
+        values = tuple(cells.get(index, "") for index in range(last_column + 1))
+        while values and not values[-1]:
+            values = values[:-1]
+        if values:
+            rows.append(values)
+    return tuple(rows)
+
+
+def _xlsx_column_index(letters: str) -> int:
+    value = 0
+    for letter in letters:
+        value = value * 26 + ord(letter) - ord("A") + 1
+    return value - 1
+
+
+def _xlsx_cell_value(
+    cell: ElementTree.Element,
+    *,
+    shared_strings: tuple[str, ...],
+    style_formats: tuple[str, ...],
+    uses_1904_dates: bool,
+) -> str:
+    cell_type = cell.get("t", "n")
+    value_node = cell.find(f"{{{_SHEET_NAMESPACE}}}v")
+    raw = "" if value_node is None else (value_node.text or "")
+    if cell_type == "inlineStr":
+        raw = "".join(text.text or "" for text in cell.iter(f"{{{_SHEET_NAMESPACE}}}t"))
+    elif cell_type == "s":
+        try:
+            raw = shared_strings[int(raw)]
+        except (IndexError, ValueError) as error:
+            raise TextExtractionError("invalid_xlsx") from error
+    elif cell_type == "b":
+        raw = "TRUE" if raw == "1" else "FALSE"
+    if cell_type != "n" or not raw:
+        return _normalize_structured_cell(raw)
+    try:
+        style_index = int(cell.get("s", "0"))
+    except ValueError as error:
+        raise TextExtractionError("invalid_xlsx") from error
+    format_code = style_formats[style_index] if style_index < len(style_formats) else ""
+    return _xlsx_format_number(raw, format_code, uses_1904_dates=uses_1904_dates)
+
+
+def _xlsx_format_number(raw: str, format_code: str, *, uses_1904_dates: bool) -> str:
+    try:
+        number = float(raw)
+    except ValueError as error:
+        raise TextExtractionError("invalid_xlsx") from error
+    normalized_format = format_code.casefold()
+    if "builtin-date" in normalized_format or (
+        "y" in normalized_format and "d" in normalized_format
+    ):
+        epoch = date(1904, 1, 1) if uses_1904_dates else date(1899, 12, 30)
+        return (epoch + timedelta(days=int(number))).isoformat()
+    if "$" in format_code:
+        return f"${number:,.0f}" if number.is_integer() else f"${number:,.2f}"
+    if "%" in format_code:
+        return f"{number * 100:g}%"
+    return str(int(number)) if number.is_integer() else str(number)
 
 
 def _decode_utf8(content: bytes) -> str:

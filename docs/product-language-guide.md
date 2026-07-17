@@ -604,18 +604,18 @@ Required ideas:
 
 - The documents are prepared.
 - The documents are fictional.
-- The result is fixed.
+- Visitors can ask questions without connecting Google Drive.
 - The sample is not connected to Google Drive.
 
 Good:
 
-> This sample uses prepared fictional documents so you can see how Extent handles evidence and disagreements. It is not connected to Google Drive.
+> This public sample uses a prepared fictional renewal packet. Ask questions without signing in or connecting Google Drive.
 
 Avoid:
 
 - Live workspace
 - Your folder
-- Extent is reading these files now
+- Your Google Drive folder
 - Real customer documents
 
 The disclosure must be visible near the sample's primary content. Do not rely on metadata or a footer alone.
@@ -950,4 +950,4 @@ Use these as structures, not as automatic replacements.
 
 ### Sample disclosure
 
-> This sample uses prepared fictional documents so you can see how Extent handles evidence and disagreements. It is not connected to Google Drive.
+> This public sample uses a prepared fictional renewal packet. Ask questions without signing in or connecting Google Drive.

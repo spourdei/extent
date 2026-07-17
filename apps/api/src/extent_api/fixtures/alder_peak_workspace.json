@@ -1,0 +1,189 @@
+{
+  "citationContexts": [
+    {
+      "citationId": "10000000-0000-4000-8000-000000000001",
+      "fileName": "03_policy_binder.pdf",
+      "locatorLabel": "Page 1",
+      "observedAt": "2026-07-17T16:17:00.000Z",
+      "passageAfter": "\nCoverage basis\nTotal insured value: USD 84,200,000 across six scheduled locations.",
+      "passageBefore": "GRANITE HARBOR | BINDER GH-CP-482771\nCommercial Package Binder\n"
+    }
+  ],
+  "execution": {
+    "acknowledgementCopyKey": "evidence_acknowledgement",
+    "contextManifest": null,
+    "replayed": false,
+    "stages": ["accepted", "retrieving", "verifying", "publishing", "complete"],
+    "view": {
+      "answerId": "20000000-0000-4000-8000-000000000001",
+      "citations": [
+        {
+          "citationId": "10000000-0000-4000-8000-000000000001",
+          "documentVersionId": "30000000-0000-4000-8000-000000000003",
+          "locator": {
+            "normalizedEndExclusive": 125,
+            "normalizedStart": 0,
+            "rawEndExclusive": 125,
+            "rawStart": 0,
+            "kind": "pdf_page",
+            "pageIndexZeroBased": 0,
+            "printedPageLabel": "Page 1"
+          },
+          "quote": "Total annual package premium: USD 146,950. Taxes, assessments, and any separately elected terrorism premium\nare not included.",
+          "sourceBlockId": "40000000-0000-4000-8000-000000000003"
+        }
+      ],
+      "claims": [
+        {
+          "claimId": "50000000-0000-4000-8000-000000000001",
+          "kind": "extracted",
+          "lineage": {
+            "applicability": {
+              "effectiveFrom": "2026-10-01",
+              "effectiveTo": "2027-10-01",
+              "entity": "Alder Peak Manufacturing, Inc.",
+              "field": "total annual package premium",
+              "periodLabel": "2026-2027 policy period",
+              "scope": "bound commercial package"
+            },
+            "citationIds": ["10000000-0000-4000-8000-000000000001"],
+            "documentVersionId": "30000000-0000-4000-8000-000000000003",
+            "kind": "extracted",
+            "normalizedValue": {
+              "currency": "USD",
+              "kind": "money",
+              "literal": "USD 146,950",
+              "valueMinor": "14695000"
+            }
+          },
+          "relationKind": "fact",
+          "text": "The binder states a total annual package premium of USD 146,950.",
+          "citationIds": ["10000000-0000-4000-8000-000000000001"],
+          "status": "published"
+        }
+      ],
+      "funnel": {
+        "candidateBlockIds": ["40000000-0000-4000-8000-000000000003"],
+        "eligibleClaimIds": ["50000000-0000-4000-8000-000000000001"],
+        "excludedEvidence": [],
+        "includedBlockIds": ["40000000-0000-4000-8000-000000000003"],
+        "proposedClaims": [
+          {
+            "citedBlockIds": ["40000000-0000-4000-8000-000000000003"],
+            "claimId": "50000000-0000-4000-8000-000000000001"
+          }
+        ],
+        "publishedClaimIds": ["50000000-0000-4000-8000-000000000001"],
+        "suppressedClaims": [],
+        "verifierVerdicts": [
+          {
+            "claimId": "50000000-0000-4000-8000-000000000001",
+            "verdict": "supported"
+          }
+        ]
+      },
+      "revision": {
+        "coverage": {
+          "capped": 0,
+          "discovered": 7,
+          "discoveryComplete": true,
+          "failed": 0,
+          "gapReasons": [],
+          "inaccessible": 0,
+          "processing": 0,
+          "ready": 7,
+          "unsafeToParse": 0,
+          "unknownBranches": 0,
+          "unstable": 0,
+          "unsupported": 0
+        },
+        "freshness": {
+          "checkedAt": "2026-07-17T16:17:07.000Z",
+          "status": "fresh"
+        },
+        "observedVersionCount": 7,
+        "snapshotId": "60000000-0000-4000-8000-000000000001",
+        "syncEndedAt": "2026-07-17T16:17:07.000Z",
+        "syncStartedAt": "2026-07-17T16:17:00.000Z"
+      },
+      "terminal": {
+        "terminalAt": "2026-07-17T16:17:08.000Z",
+        "traceId": "70000000-0000-4000-8000-000000000001",
+        "answerId": "20000000-0000-4000-8000-000000000001",
+        "status": "evidence_supported"
+      },
+      "traceId": "70000000-0000-4000-8000-000000000001"
+    }
+  },
+  "question": "What annual package premium does the binder state?",
+  "workspace": {
+    "name": "Alder Peak 2026 Renewal",
+    "revisionLabel": "Jul 17, 2026, 16:17 UTC",
+    "sampleLabel": "Public interactive sample",
+    "sources": [
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000001",
+        "evaluated": false,
+        "fileName": "01_broker_renewal_summary.docx",
+        "observedAt": "2026-07-17T16:17:01.000Z",
+        "reason": null,
+        "selected": false,
+        "status": "ready"
+      },
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000002",
+        "evaluated": false,
+        "fileName": "02_carrier_quote_revision_2.pdf",
+        "observedAt": "2026-07-17T16:17:02.000Z",
+        "reason": null,
+        "selected": false,
+        "status": "ready"
+      },
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000003",
+        "evaluated": true,
+        "fileName": "03_policy_binder.pdf",
+        "observedAt": "2026-07-17T16:17:03.000Z",
+        "reason": null,
+        "selected": true,
+        "status": "ready"
+      },
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000004",
+        "evaluated": false,
+        "fileName": "04_underwriting_file_note.docx",
+        "observedAt": "2026-07-17T16:17:04.000Z",
+        "reason": null,
+        "selected": false,
+        "status": "ready"
+      },
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000005",
+        "evaluated": false,
+        "fileName": "05_statement_of_values.csv",
+        "observedAt": "2026-07-17T16:17:05.000Z",
+        "reason": null,
+        "selected": false,
+        "status": "ready"
+      },
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000006",
+        "evaluated": false,
+        "fileName": "06_loss_runs.csv",
+        "observedAt": "2026-07-17T16:17:06.000Z",
+        "reason": null,
+        "selected": false,
+        "status": "ready"
+      },
+      {
+        "documentVersionId": "30000000-0000-4000-8000-000000000007",
+        "evaluated": false,
+        "fileName": "07_terrorism_election.xlsx",
+        "observedAt": "2026-07-17T16:17:07.000Z",
+        "reason": null,
+        "selected": false,
+        "status": "ready"
+      }
+    ]
+  }
+}

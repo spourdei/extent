@@ -112,7 +112,9 @@ function passageEvidence(
   );
   return {
     context,
-    driveFileId: passage.driveFileId,
+    ...(passage.driveFileId.startsWith("demo-")
+      ? {}
+      : { driveFileId: passage.driveFileId }),
     file: passage.sourceName,
     highlight,
     id,
@@ -470,6 +472,7 @@ export function adaptWorkspaceSources(
       invalid_csv: "Extent couldn’t read this CSV",
       invalid_docx: "Extent couldn’t read this DOCX",
       invalid_encoding: "Extent couldn’t read this text file",
+      invalid_xlsx: "Extent couldn’t read this spreadsheet",
       invalid_pdf: "Extent couldn’t read this PDF",
       no_text: "Extent couldn’t find readable text in this file",
       not_found: "This file is no longer in the folder",

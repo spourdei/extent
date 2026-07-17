@@ -263,12 +263,15 @@ export function adaptSampleWorkspace(
         folder: "/Prepared sample/",
         id: source.documentVersionId,
         name: source.fileName,
-        state: source.selected
-          ? "Quoted in this finding"
-          : source.evaluated
-            ? "Checked for support"
-            : "Ready",
-        tone: "success",
+        state:
+          source.status === "unsupported"
+            ? (source.reason ?? "Unsupported file type")
+            : source.selected
+              ? "Quoted in this finding"
+              : source.evaluated
+                ? "Checked for support"
+                : "Ready",
+        tone: source.status === "unsupported" ? "muted" : "success",
       }),
     ),
     folderTitle: sample.workspace.name,

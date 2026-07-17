@@ -1,0 +1,10 @@
+Claim_ID,Policy_Year,Loss_Date,Location_ID,Cause_of_Loss,Status,Paid,Reserve,Recovery,Net_Incurred,Description
+CLM-2301,2023,2023-02-14,LOC-001,Equipment breakdown,Closed,180000,0,0,180000,CNC spindle failure and business interruption
+CLM-2302,2023,2023-06-03,LOC-004,Water damage,Closed,92500,0,0,92500,Failed roof drain damaged assembly inventory
+CLM-2303,2023,2023-11-19,LOC-002,Premises liability,Open,25000,16000,0,41000,Visitor slip and fall in loading area
+CLM-2401,2024,2024-01-27,LOC-003,Fire,Open,240000,180000,10000,410000,Dust collector fire damaged fabrication line
+CLM-2402,2024,2024-03-11,LOC-006,Wind,Closed,125000,0,0,125000,Roof membrane and water intrusion damage
+CLM-2403,2024,2024-09-08,LOC-001,Forklift collision,Closed,46800,0,0,46800,Forklift struck racking and finished stock
+CLM-2501,2025,2025-02-22,LOC-002,Theft,Open,110000,60000,5000,165000,Electronic components stolen from secured cage
+CLM-2502,2025,2025-05-16,LOC-005,Equipment breakdown,Closed,92000,0,0,92000,Compressor failure affected climate-controlled storage
+CLM-2503,2025,2025-10-04,LOC-004,Products liability,Open,20000,20000,1600,38400,Alleged component defect with property damage

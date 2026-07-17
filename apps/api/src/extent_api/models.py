@@ -374,8 +374,19 @@ class WorkspaceSource(ApiModel):
     evaluated: bool
     file_name: Annotated[str, Field(min_length=1, max_length=240)]
     observed_at: AwareDatetime
+    reason: Annotated[str, Field(min_length=1, max_length=120)] | None = None
     selected: bool
-    status: Literal["ready"]
+    status: Literal["ready", "unsupported"]
+
+    @model_validator(mode="after")
+    def unsupported_sources_are_not_evaluated(self) -> Self:
+        if self.status == "unsupported" and (
+            self.evaluated or self.selected or self.reason is None
+        ):
+            raise ValueError("unsupported sample sources require a reason and no evaluation")
+        if self.status == "ready" and self.reason is not None:
+            raise ValueError("ready sample sources cannot have an unavailable reason")
+        return self
 
 
 class WorkspaceSummary(ApiModel):
