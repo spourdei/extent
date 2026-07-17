@@ -29,9 +29,10 @@ QueryIntent = Literal[
 _WORD = re.compile(r"[^\W_]+|\d+", re.UNICODE)
 _LIST = re.compile(r"\b(?:all|each|every|complete\s+list|list|enumerate|show\s+all)\b", re.I)
 _AGGREGATE = re.compile(
-    r"\b(?:average|avg|count|how\s+many|number\s+of|maximum|max|minimum|min|sum)\b",
+    r"\b(?:average|avg|count|how\s+many|number\s+of|sum)\b",
     re.I,
 )
+_EXTREMA = re.compile(r"\b(?:maximum|max|minimum|min)\b", re.I)
 _TOTAL = re.compile(r"\b(?:aggregate|total)\b", re.I)
 _SET_NOUN = re.compile(r"\b(?:dataset|file|record|row|source|table)s?\b", re.I)
 _GROUP = re.compile(r"\b(?:break\s*down|for\s+each|group(?:ed)?|per)\b|\bby\b", re.I)
@@ -65,7 +66,15 @@ _JOIN = re.compile(
     r"\b(?:across|between|against)\b.{0,80}\b(?:files?|sources?|tables?|datasets?)\b",
     re.I,
 )
-_COMPARE = re.compile(r"\b(?:compare|comparison|conflict|contradict|difference)\b", re.I)
+_COMPARE = re.compile(
+    r"\b(?:compare|comparison|conflict|contradict|difference|disagree|"
+    r"inconsistent|mismatch|versus|vs\.?)\b",
+    re.I,
+)
+_COORDINATED_SCOPE = re.compile(
+    r"\b(?:across|between|by|for|from|in)\b[^?]{1,180}\band\b",
+    re.I,
+)
 _SUMMARY = re.compile(r"\b(?:summari[sz]e|summary|overview)\b", re.I)
 
 
@@ -84,21 +93,34 @@ def plan_query(question: str) -> QueryPlan:
     """Classify the execution capability required by ``question``.
 
     A universal, aggregate, joined, filtered, grouped, or exhaustive request is
-    never safe to answer from retrieved samples.  A comparison is marked mixed:
-    it may be a table reconciliation or a narrative conflict, which the caller
-    resolves after inspecting complete ready data.
+    never safe to answer from retrieved samples. A comparison is marked mixed:
+    explicit set-wide or joined comparisons require complete data, while a
+    bounded narrative comparison between named scopes uses diverse retrieval.
     """
 
     normalized = " ".join(question.strip().split())
     intents: set[QueryIntent] = set()
     if _LIST.search(normalized):
         intents.add("list")
-    if _AGGREGATE.search(normalized) or (
-        _TOTAL.search(normalized)
-        and (
-            _SET_NOUN.search(normalized)
-            or _LIST.search(normalized)
-            or re.search(r"\b(?:by|per|across|where|for\s+each|of\s+all)\b", normalized, re.I)
+    if (
+        _AGGREGATE.search(normalized)
+        or (
+            _EXTREMA.search(normalized)
+            and (
+                _SET_NOUN.search(normalized)
+                or _LIST.search(normalized)
+                or re.search(r"\b(?:across|among|of\s+all)\b", normalized, re.I)
+            )
+        )
+        or (
+            _TOTAL.search(normalized)
+            and (
+                _SET_NOUN.search(normalized)
+                or _LIST.search(normalized)
+                or re.search(
+                    r"\b(?:by|per|across|where|for\s+each|of\s+all)\b", normalized, re.I
+                )
+            )
         )
     ):
         intents.add("aggregate")
@@ -119,7 +141,10 @@ def plan_query(question: str) -> QueryPlan:
         intents.add("completeness")
     if _JOIN.search(normalized):
         intents.add("join")
-    if _COMPARE.search(normalized):
+    if _COMPARE.search(normalized) or (
+        _COORDINATED_SCOPE.search(normalized)
+        and not intents & {"aggregate", "completeness", "group", "join", "list", "order"}
+    ):
         intents.add("compare")
     if _SUMMARY.search(normalized):
         intents.add("summary")
@@ -130,7 +155,6 @@ def plan_query(question: str) -> QueryPlan:
 
     complete_intents = {
         "aggregate",
-        "compare",
         "completeness",
         "group",
         "join",

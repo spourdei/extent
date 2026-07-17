@@ -1,5 +1,6 @@
 """Focused regressions for query routing at the structured execution boundary."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 from uuid import UUID
@@ -13,6 +14,8 @@ from extent_api.database.query_repository import (
     StoredQuestionResult,
 )
 from extent_api.models import CoverageManifest
+from extent_api.providers.chat_completion import ModelConversationTurn, ModelPassage
+from extent_api.services.publication import AnswerDraft, ClaimDraft, DraftEvidenceRef
 from extent_api.services.query import QueryService
 from extent_api.services.structured_analysis import (
     ReconciliationAudit,
@@ -181,6 +184,114 @@ class _QueryStore:
         )
 
 
+class _ComparisonStore(_QueryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.context = replace(
+            self.context,
+            coverage=self.context.coverage.model_copy(update={"discovered": 2, "ready": 2}),
+        )
+        self.blocks = [
+            RetrievedBlock(
+                block_id=UUID("50000000-0000-4000-8000-000000000011"),
+                drive_file_id="drive-proposal",
+                line_start_one_based=1,
+                origin_kind="text_lines",
+                page_index_zero_based=None,
+                path=("Evidence", "proposal.txt"),
+                printed_page_label=None,
+                source_name="proposal.txt",
+                source_file_id=UUID("40000000-0000-4000-8000-000000000011"),
+                text="Proposal service level: Silver.",
+            ),
+            RetrievedBlock(
+                block_id=UUID("50000000-0000-4000-8000-000000000012"),
+                drive_file_id="drive-contract",
+                line_start_one_based=1,
+                origin_kind="text_lines",
+                page_index_zero_based=None,
+                path=("Evidence", "signed_contract.txt"),
+                printed_page_label=None,
+                source_name="signed_contract.txt",
+                source_file_id=UUID("40000000-0000-4000-8000-000000000012"),
+                text="Signed contract service level: Gold.",
+            ),
+        ]
+
+    def list_ready_blocks(self, *, context: QueryContext) -> list[RetrievedBlock]:
+        assert context == self.context
+        return self.blocks
+
+    def search_blocks(self, **_kwargs: object) -> list[RetrievedBlock]:
+        self.search_reads += 1
+        return self.blocks
+
+
+class _RepairingComparisonProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(
+        self,
+        *,
+        history: list[ModelConversationTurn],
+        passages: list[ModelPassage],
+        question: str,
+    ) -> AnswerDraft:
+        del history, question
+        self.calls += 1
+        by_source = {passage.source_name: passage for passage in passages}
+        proposal = by_source["proposal.txt"]
+        contract = by_source["signed_contract.txt"]
+        if self.calls == 1:
+            return AnswerDraft(
+                claims=[
+                    ClaimDraft(
+                        claim_id=UUID("80000000-0000-4000-8000-000000000001"),
+                        evidence=[
+                            DraftEvidenceRef(
+                                block_id=proposal.block_id,
+                                exact_quote=proposal.exact_quote,
+                                value="Silver",
+                            )
+                        ],
+                        relation="fact",
+                        text=proposal.exact_quote,
+                        value="Silver",
+                    )
+                ],
+                summary="The proposal states Silver.",
+            )
+        return AnswerDraft(
+            claims=[
+                ClaimDraft(
+                    claim_id=UUID("80000000-0000-4000-8000-000000000002"),
+                    evidence=[
+                        DraftEvidenceRef(
+                            block_id=proposal.block_id,
+                            entity="service agreement",
+                            exact_quote=proposal.exact_quote,
+                            field="service level",
+                            scope="service agreement",
+                            value="Silver",
+                        ),
+                        DraftEvidenceRef(
+                            block_id=contract.block_id,
+                            entity="service agreement",
+                            exact_quote=contract.exact_quote,
+                            field="service level",
+                            scope="service agreement",
+                            value="Gold",
+                        ),
+                    ],
+                    relation="conflict",
+                    text=f"{proposal.exact_quote} {contract.exact_quote}",
+                )
+            ],
+            summary="The proposal and signed contract state different service levels.",
+        )
+
+
 def _active_session() -> ActiveSessionRecord:
     return ActiveSessionRecord(
         account=AccountRecord(
@@ -242,3 +353,30 @@ def test_standalone_question_skips_conversation_history() -> None:
     assert result.status == "evidence_retrieved"
     assert store.history_reads == 0
     assert store.search_reads == 1
+
+
+def test_multi_scope_question_repairs_one_sided_draft_and_preserves_conflict() -> None:
+    store = _ComparisonStore()
+    provider = _RepairingComparisonProvider()
+    service = QueryService(
+        answer_provider=provider,
+        repository=store,
+        rate_limiter=_RateLimiter(),
+        clock=lambda: NOW,
+    )
+
+    result = service.ask(
+        active_session=_active_session(),
+        idempotency_key="question-1",
+        question=("What service levels are stated for the proposal and the signed contract?"),
+        workspace_id=WORKSPACE_ID,
+    )
+
+    assert provider.calls == 2
+    assert result.status == "conflict"
+    assert len(result.claims) == 1
+    assert result.claims[0].relation == "conflict"
+    assert {citation.source_name for citation in result.claims[0].citations} == {
+        "proposal.txt",
+        "signed_contract.txt",
+    }

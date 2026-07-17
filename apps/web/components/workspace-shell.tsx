@@ -430,10 +430,11 @@ function QuestionView({
         <EvidenceRows
           activeEvidenceId={activeEvidenceId}
           heading={
-            question.stateLabel === "Values extracted" ||
+            question.evidenceHeading ??
+            (question.stateLabel === "Values extracted" ||
             question.stateLabel === "Partial extraction"
               ? "Where Extent found it"
-              : "Why Extent says this"
+              : "Why Extent says this")
           }
           onInspect={onInspect}
           rows={question.evidenceRows}

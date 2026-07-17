@@ -63,6 +63,34 @@ def test_planner_keeps_scalar_questions_direct_and_routes_set_wide_work() -> Non
     assert set(breakdown.intents) >= {"aggregate", "group"}
 
 
+def test_planner_recognizes_coordinated_scopes_without_magic_compare_wording() -> None:
+    stated_values = plan_query(
+        "What service levels are stated for the proposal and the signed contract?"
+    )
+    disagreement = plan_query(
+        "Do the proposal and signed contract disagree about the service level?"
+    )
+
+    assert stated_values.mode == "mixed"
+    assert disagreement.mode == "mixed"
+    assert stated_values.intents == ("compare",)
+    assert disagreement.intents == ("compare",)
+    assert not stated_values.requires_complete_data
+
+
+def test_planner_does_not_mistake_a_named_minimum_field_for_aggregation() -> None:
+    named_field = plan_query(
+        "What flood deductible minimum is stated in quote revision 2 and the binder?"
+    )
+    set_extrema = plan_query("What is the minimum Recovery across Claim_ID records?")
+
+    assert named_field.intents == ("compare",)
+    assert named_field.mode == "mixed"
+    assert not named_field.requires_complete_data
+    assert set_extrema.mode == "structured"
+    assert set_extrema.requires_complete_data
+
+
 def test_planner_recognizes_grouped_counts_and_explicit_ordering() -> None:
     grouped = plan_query(
         "For each location, show the number of activities and total net amount."

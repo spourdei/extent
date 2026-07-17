@@ -44,6 +44,7 @@ export interface DeskQuestion {
   comparisons?: readonly DeskComparison[];
   coverage?: string;
   evidenceRows?: readonly DeskEvidenceRow[];
+  evidenceHeading?: string;
   finding: string;
   id: string;
   kind: DeskQuestionKind;
@@ -151,10 +152,13 @@ function resultKind(result: QuestionResult): DeskQuestionKind {
 function stateLabel(result: QuestionResult, kind: DeskQuestionKind): string {
   if (result.policyVersion === "clarification-policy-v1") return "Clarification needed";
   if (result.policyVersion === "source-state-policy-v1") return "File status";
+  if (result.policyVersion === "structured-analysis-policy-v1") {
+    if (result.status === "coverage_limited") return "Partial calculation";
+    return result.claims.length > 0 ? "Calculated result" : "Calculation incomplete";
+  }
   if (
     result.policyVersion === "exhaustive-extraction-policy-v1" ||
-    result.policyVersion === "exhaustive-premium-policy-v1" ||
-    result.policyVersion === "structured-analysis-policy-v1"
+    result.policyVersion === "exhaustive-premium-policy-v1"
   ) {
     if (result.status === "coverage_limited") return "Partial extraction";
     return result.claims.length > 0 ? "Values extracted" : "Extraction complete";
@@ -245,6 +249,14 @@ function resultFinding(result: QuestionResult): string {
       ? "Extent checked the folder’s current file status. Some files weren’t available. Review the file list for details."
       : "Extent checked the folder’s current file status. Review the file list to see what is ready.";
   }
+  if (result.policyVersion === "structured-analysis-policy-v1") {
+    if (result.claims.length > 0) {
+      return result.claims.map((claim) => claim.text).join(" ");
+    }
+    return result.status === "coverage_limited"
+      ? "Extent couldn’t complete this calculation from every required row."
+      : "Extent couldn’t produce a supported calculated result.";
+  }
   if (isCompleteDataPolicy(result)) return extractionFinding(result);
   if (result.generationStatus === "failed") {
     return result.passages.length > 0
@@ -271,6 +283,7 @@ export function adaptQuestionResults(results: readonly QuestionResult[]): DeskRe
     const kind = resultKind(result);
     const citations = result.claims.flatMap((claim) =>
       claim.citations.map((passage, index) => ({
+        citationIndex: index,
         claim,
         evidenceId: `${result.answerId}:claim:${claim.claimId}:${String(index)}`,
         passage,
@@ -313,28 +326,39 @@ export function adaptQuestionResults(results: readonly QuestionResult[]): DeskRe
     } satisfies DeskQuestion;
 
     if (result.claims.length > 0 && kind !== "disagree" && kind !== "change") {
+      const calculated = result.policyVersion === "structured-analysis-policy-v1";
       return {
         ...common,
-        evidenceRows: citations.map(({ claim, evidenceId, passage }) => ({
+        ...(calculated ? { evidenceHeading: "Calculation lineage" } : {}),
+        evidenceRows: citations.map(({ citationIndex, claim, evidenceId, passage }) => ({
           evidenceId,
-          label: claim.value ?? claim.text,
+          label: calculated
+            ? claim.citations.length > 1
+              ? citationIndex === 0
+                ? "First contributing row"
+                : "Last contributing row"
+              : "Contributing row"
+            : (claim.value ?? claim.text),
           locator: `${passage.sourceName} · ${locatorFor(passage)}`,
         })),
+        ...(calculated
+          ? {
+              note: "This result was calculated across every matched row. The rows shown are representative lineage; the calculated value does not appear verbatim in either row.",
+            }
+          : {}),
       };
     }
     if (kind === "disagree") {
-      const comparisons = citations
-        .slice(0, 2)
-        .map(({ claim, evidenceId, passage }, index) => ({
-          caption: claim.text,
-          evidenceId,
-          locator: `${passage.sourceName} · ${locatorFor(passage)}`,
-          value:
-            passage.normalizedValue ??
-            passage.rawValue ??
-            claim.value ??
-            `Source ${String(index + 1)}`,
-        }));
+      const comparisons = citations.map(({ claim, evidenceId, passage }, index) => ({
+        caption: claim.text,
+        evidenceId,
+        locator: `${passage.sourceName} · ${locatorFor(passage)}`,
+        value:
+          passage.normalizedValue ??
+          passage.rawValue ??
+          claim.value ??
+          `Source ${String(index + 1)}`,
+      }));
       return {
         ...common,
         comparisons,

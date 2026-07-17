@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from extent_api.database.identity_repository import ActiveSessionRecord
 from extent_api.database.query_repository import (
@@ -48,6 +48,7 @@ from extent_api.services.publication import (
     AnswerDraft,
     ApprovedCitation,
     ApprovedClaim,
+    ClaimDraft,
     DraftEvidenceRef,
     EvidenceBlock,
     PdfBlockOrigin,
@@ -129,6 +130,16 @@ _STOPWORDS = {
     "with",
 }
 _SINGLE_TOTAL_TERMS = {"aggregate", "combined", "final", "overall", "package", "total"}
+_VALUE_ANCHOR_QUERY_NOISE = {
+    "binder",
+    "document",
+    "file",
+    "quote",
+    "revision",
+    "source",
+    "state",
+    "stated",
+}
 _TERMINAL_RUNS = {"ready", "partial"}
 _EXPLICIT_COMPLETE_SCOPE = re.compile(
     r"\b(?:all|each|every|dataset|file|record|row|source|table)s?\b|"
@@ -146,10 +157,35 @@ _RETRIEVAL_CANDIDATE_LIMIT = 32
 _PASSAGE_LIMIT = 6
 _PASSAGE_PER_SOURCE_LIMIT = 3
 _PASSAGE_EXCERPT_LIMIT = 280
+_BROAD_COMPARISON_EXCERPT_LIMIT = 1_800
 _CLARIFICATION_MESSAGE = "Which prior value or subject do you mean?"
 _EXPLICIT_MULTI_FACT_QUESTION = re.compile(
     r"\b(?:break\s*down|compare|comparison|differences?|list|summari[sz]e|"
     r"what\s+are|which\s+are)\b",
+    re.IGNORECASE,
+)
+_AUTHORITATIVE_VALUE_QUESTION = re.compile(
+    r"\b(?:authoritative|controlling|current|final|governing|operative|"
+    r"superseding|superseded|latest)\b",
+    re.IGNORECASE,
+)
+_EXPLANATION_QUESTION = re.compile(
+    r"\b(?:account\s+for|explain|explanation|reason|reconcile|why)\b",
+    re.IGNORECASE,
+)
+_COMPARISON_CALCULATION_QUESTION = re.compile(
+    r"\b(?:delta|how\s+much|increase|decrease|higher|lower)\b|"
+    r"\bdifference\s+(?:between|from)\b",
+    re.IGNORECASE,
+)
+_BROAD_COMPARISON_QUESTION = re.compile(
+    r"\b(?:what|which)\b.{0,80}\b(?:differences?|discrepancies|fields?|"
+    r"mismatches|terms)\b",
+    re.IGNORECASE,
+)
+_CONFLICT_SEEKING_QUESTION = re.compile(
+    r"\b(?:conflict|contradict|disagree|inconsistent|mismatch|"
+    r"do(?:es)?\s+not\s+match|not\s+match)\b",
     re.IGNORECASE,
 )
 _STRUCTURED_VALUE_QUESTION = re.compile(
@@ -168,7 +204,7 @@ _WHO_VERBAL_QUESTION = re.compile(
     r"(?P<verb>[^\W\d_]+)\b",
     re.IGNORECASE,
 )
-_STRONG_ASSIGNMENT_SEPARATOR = re.compile(r":|=|\s[-\u2013\u2014]\s")
+_STRONG_ASSIGNMENT_SEPARATOR = re.compile(r":|=|\t|\s[-\u2013\u2014]\s")
 _FOLLOW_UP_REFERENCE = re.compile(
     r"\b(?:former|it|latter|one|ones|same|that|them|these|they|this|those)\b",
     re.IGNORECASE,
@@ -214,6 +250,7 @@ _NEGATED_CONTROL_EVIDENCE = re.compile(
     r"meeting\s+resolution|ratif(?:ied|ication)|signed)\b",
     re.IGNORECASE,
 )
+_COMPARISON_RECOVERY_NAMESPACE = UUID("9122337b-2621-4b0d-b02f-58c6575ed768")
 
 
 class WorkspaceNotFound(RuntimeError):
@@ -347,7 +384,6 @@ class QueryService:
             return project_question_result(stored)
         query_plan = plan_query(normalized_question)
         exhaustive_request = parse_exhaustive_request(normalized_question)
-        complete_blocks: list[RetrievedBlock] | None = None
         if isinstance(
             exhaustive_request, ExhaustiveRequestNeedsClarification
         ) and query_plan.mode not in {"mixed", "structured"}:
@@ -365,7 +401,6 @@ class QueryService:
             return project_question_result(stored)
         if query_plan.requires_complete_data:
             ready_blocks = self._repository.list_ready_blocks(context=context)
-            complete_blocks = ready_blocks
             analysis = analyze_structured_question(
                 ready_blocks,
                 idempotency_key=idempotency_key,
@@ -463,7 +498,10 @@ class QueryService:
         assignment_token_sequences = _query_assignment_token_sequences(
             retrieval_question, tokens=tokens
         )
-        prefer_value_evidence = _question_prefers_structured_value(normalized_question) or (
+        prefer_value_evidence = (
+            _question_prefers_structured_value(normalized_question)
+            or _requires_multi_branch_comparison(normalized_question, plan=query_plan)
+        ) or (
             is_follow_up
             and any(
                 _question_prefers_structured_value(turn.question)
@@ -476,9 +514,7 @@ class QueryService:
                 embedding = self._embedding_provider.embed([retrieval_question])[0]
             except EmbeddingGenerationError as error:
                 raise RetrievalUnavailable from error
-        if complete_blocks is not None and query_plan.mode == "mixed":
-            candidates = complete_blocks
-        elif prefer_value_evidence and embedding is not None:
+        if prefer_value_evidence and embedding is not None:
             lexical_candidates = self._repository.search_blocks(
                 context=context,
                 embedding=None,
@@ -519,29 +555,15 @@ class QueryService:
         passages = _select_passages(
             candidates,
             assignment_token_sequences=assignment_token_sequences,
+            excerpt_limit=(
+                _BROAD_COMPARISON_EXCERPT_LIMIT
+                if _BROAD_COMPARISON_QUESTION.search(normalized_question) is not None
+                else _PASSAGE_EXCERPT_LIMIT
+            ),
             prefer_value_evidence=prefer_value_evidence,
             require_token_match=embedding is None,
             tokens=tokens,
         )
-        if complete_blocks is not None and query_plan.mode == "mixed":
-            relevant_block_count = sum(
-                _token_coverage(candidate.text, tokens=tokens) > 0
-                for candidate in complete_blocks
-            )
-            if relevant_block_count > _PASSAGE_LIMIT:
-                stored = self._repository.store_retrieval_result(
-                    context=context,
-                    idempotency_key=idempotency_key,
-                    message=(
-                        f"Mixed-source synthesis found {relevant_block_count} relevant "
-                        f"blocks, exceeding the {_PASSAGE_LIMIT}-passage verified answer "
-                        "boundary; narrow the comparison scope."
-                    ),
-                    now=now,
-                    passages=passages,
-                    question=normalized_question,
-                )
-                return project_question_result(stored)
         if query_plan.mode == "direct" and any(
             candidate.pipeline_version
             in {
@@ -601,71 +623,155 @@ class QueryService:
             return project_question_result(stored)
 
         evidence_blocks = _evidence_blocks(candidates, passages=passages, context=context)
+        prepared_comparison_recovery = (
+            _comparison_recovery_draft(
+                candidates,
+                passages=passages,
+                idempotency_key=idempotency_key,
+                question=normalized_question,
+            )
+            if _BROAD_COMPARISON_QUESTION.search(normalized_question) is not None
+            else None
+        )
+        generation_question = _generation_question(
+            normalized_question,
+            plan=query_plan,
+        )
         try:
             draft = self._answer_provider.generate(
                 history=model_history,
                 passages=_model_passages(passages),
-                question=normalized_question,
+                question=generation_question,
             )
         except ModelGenerationError as first_error:
-            try:
-                draft = self._answer_provider.generate(
-                    history=[],
-                    passages=_model_passages(_recovery_passages(passages)),
-                    question=normalized_question,
-                )
-            except ModelGenerationError as retry_error:
-                recovered = _deterministic_answer_recovery(
-                    candidates,
-                    idempotency_key=idempotency_key,
-                    question=normalized_question,
-                    run_id=context.run_id,
-                )
-                if recovered:
-                    stored = self._repository.store_publication_result(
-                        claims=recovered,
+            if prepared_comparison_recovery is not None:
+                draft = prepared_comparison_recovery
+            else:
+                try:
+                    draft = self._answer_provider.generate(
+                        history=[],
+                        passages=_model_passages(_recovery_passages(passages)),
+                        question=generation_question,
+                    )
+                except ModelGenerationError as retry_error:
+                    recovered = _deterministic_answer_recovery(
+                        candidates,
+                        idempotency_key=idempotency_key,
+                        question=normalized_question,
+                        run_id=context.run_id,
+                    )
+                    if recovered:
+                        stored = self._repository.store_publication_result(
+                            claims=recovered,
+                            context=context,
+                            idempotency_key=idempotency_key,
+                            message=(
+                                "The answer model failed twice; Extent recovered the "
+                                "answer deterministically from explicit source fields."
+                            ),
+                            now=now,
+                            passages=(),
+                            question=normalized_question,
+                            status="evidence_supported",
+                        )
+                        return project_question_result(stored)
+                    stored = self._repository.store_retrieval_result(
                         context=context,
+                        generation_status="failed",
                         idempotency_key=idempotency_key,
                         message=(
-                            "The answer model failed twice; Extent recovered the answer "
-                            "deterministically from explicit source fields."
+                            f"{_generation_failure_summary(first_error, retry_error)} "
+                            "Retrieved evidence is shown for review."
                         ),
                         now=now,
-                        passages=(),
+                        passages=passages,
                         question=normalized_question,
-                        status="evidence_supported",
                     )
                     return project_question_result(stored)
-                stored = self._repository.store_retrieval_result(
-                    context=context,
-                    generation_status="failed",
-                    idempotency_key=idempotency_key,
-                    message=(
-                        f"{_generation_failure_summary(first_error, retry_error)} "
-                        "Retrieved evidence is shown for review."
-                    ),
-                    now=now,
-                    passages=passages,
-                    question=normalized_question,
-                )
-                return project_question_result(stored)
 
-        if not draft.claims and draft.needs_clarification is None:
+        if (
+            not draft.claims
+            and draft.needs_clarification is None
+            and prepared_comparison_recovery is None
+        ):
             # A valid empty response can be a transient model miss. Retry once
             # without conversation history before deterministic recovery.
             try:
                 retry_draft = self._answer_provider.generate(
                     history=[],
                     passages=_model_passages(passages),
-                    question=normalized_question,
+                    question=generation_question,
                 )
             except ModelGenerationError:
                 retry_draft = draft
             if retry_draft.claims or retry_draft.needs_clarification is not None:
                 draft = retry_draft
 
+        comparison_guard_failed = False
+        if _is_one_sided_comparison(
+            draft,
+            plan=query_plan,
+            question=normalized_question,
+        ):
+            if prepared_comparison_recovery is not None:
+                draft = prepared_comparison_recovery
+                evidence_blocks = _evidence_blocks(
+                    candidates,
+                    additional_block_ids={
+                        reference.block_id
+                        for claim in prepared_comparison_recovery.claims
+                        for reference in claim.evidence
+                    },
+                    context=context,
+                    passages=passages,
+                )
+            else:
+                try:
+                    comparison_draft = self._answer_provider.generate(
+                        history=[],
+                        passages=_model_passages(passages),
+                        question=_comparison_recovery_question(normalized_question),
+                    )
+                except ModelGenerationError:
+                    comparison_draft = draft
+                if _is_comparison_improvement(
+                    comparison_draft,
+                    question=normalized_question,
+                ):
+                    draft = comparison_draft
+                else:
+                    recovered_comparison = _comparison_recovery_draft(
+                        candidates,
+                        passages=passages,
+                        idempotency_key=idempotency_key,
+                        question=normalized_question,
+                    )
+                    if recovered_comparison is not None:
+                        draft = recovered_comparison
+                        evidence_blocks = _evidence_blocks(
+                            candidates,
+                            additional_block_ids={
+                                reference.block_id
+                                for claim in recovered_comparison.claims
+                                for reference in claim.evidence
+                            },
+                            context=context,
+                            passages=passages,
+                        )
+                    else:
+                        comparison_guard_failed = True
+                        draft = AnswerDraft(
+                            claims=[],
+                            summary=(
+                                "A one-sided answer was withheld because the question "
+                                "requests a comparison across multiple scopes."
+                            ),
+                        )
+
         authority_guard_failed = False
-        if _has_one_sided_authority_tension(draft, blocks=evidence_blocks):
+        if _question_requests_authoritative_value(normalized_question) and (
+            _has_one_sided_authority_tension(draft, blocks=evidence_blocks)
+        ):
             try:
                 authority_draft = self._answer_provider.generate(
                     history=[],
@@ -702,7 +808,7 @@ class QueryService:
             )
             return project_question_result(stored)
 
-        if not draft.claims and not authority_guard_failed:
+        if not draft.claims and not authority_guard_failed and not comparison_guard_failed:
             recovered = _deterministic_answer_recovery(
                 candidates,
                 idempotency_key=idempotency_key,
@@ -740,6 +846,7 @@ class QueryService:
             publication,
             blocks=evidence_blocks,
             draft=draft,
+            question=normalized_question,
         )
         scope_required = _requires_value_scope(
             normalized_question,
@@ -752,6 +859,49 @@ class QueryService:
             question=normalized_question,
             scope_required=scope_required,
         )
+        if _requires_multi_branch_comparison(
+            normalized_question, plan=query_plan
+        ) and not _publication_has_complete_comparison(
+            publication, question=normalized_question
+        ):
+            # A draft can look structurally complete yet fail quote verification at
+            # the publication boundary. Do not degrade a narrow, fully evidenced
+            # comparison into a passage-only result merely because the model
+            # paraphrased or malformed its citations.
+            recovered_comparison = _comparison_recovery_draft(
+                candidates,
+                passages=passages,
+                idempotency_key=idempotency_key,
+                question=normalized_question,
+            )
+            if recovered_comparison is not None:
+                evidence_blocks = _evidence_blocks(
+                    candidates,
+                    additional_block_ids={
+                        reference.block_id
+                        for claim in recovered_comparison.claims
+                        for reference in claim.evidence
+                    },
+                    context=context,
+                    passages=passages,
+                )
+                publication = authorize_answer_draft(
+                    recovered_comparison,
+                    blocks=evidence_blocks,
+                    context=PublicationContext(
+                        coverage=context.coverage,
+                        included_block_ids=[block.block_id for block in evidence_blocks],
+                        ingestion_run_id=context.run_id,
+                        run_terminal=context.run_status in _TERMINAL_RUNS,
+                        workspace_id=context.workspace_id,
+                    ),
+                )
+                publication = _resolve_conflict_authority(
+                    publication,
+                    blocks=evidence_blocks,
+                    draft=recovered_comparison,
+                    question=normalized_question,
+                )
         stored = self._repository.store_publication_result(
             claims=_claim_records(publication, candidates),
             context=context,
@@ -1012,6 +1162,396 @@ def _recovery_passages(passages: tuple[PassageRecord, ...]) -> tuple[PassageReco
     return (value_bearing or passages)[:3]
 
 
+def _generation_question(question: str, *, plan: QueryPlan) -> str:
+    if not _requires_multi_branch_comparison(question, plan=plan):
+        return question
+    return _comparison_recovery_question(question)
+
+
+def _comparison_recovery_question(question: str) -> str:
+    return (
+        f"{question}\n\nComparison-completeness instruction: preserve every named "
+        "source, version, party, period, or other scope in the question. If two "
+        "sources state different values for the same requested field, return one "
+        "conflict claim with two evidence branches and populated entity, field, "
+        "scope, and value fields. Do not choose one branch. If the question asks "
+        "for distinct facts, return one fact for each requested scope. Do not "
+        "answer only that a mismatch exists or provide only an arithmetic delta: "
+        "name every requested mismatched field and state both evidenced values."
+    )
+
+
+def _requires_multi_branch_comparison(question: str, *, plan: QueryPlan) -> bool:
+    return (
+        "compare" in plan.intents
+        and _EXPLANATION_QUESTION.search(question) is None
+        and _COMPARISON_CALCULATION_QUESTION.search(question) is None
+    )
+
+
+def _is_one_sided_comparison(
+    draft: AnswerDraft,
+    *,
+    plan: QueryPlan,
+    question: str,
+) -> bool:
+    if (
+        not _requires_multi_branch_comparison(question, plan=plan)
+        or draft.needs_clarification is not None
+    ):
+        return False
+    return not _is_comparison_improvement(draft, question=question)
+
+
+def _is_comparison_improvement(
+    draft: AnswerDraft,
+    *,
+    question: str | None = None,
+) -> bool:
+    has_comparison_claim = any(
+        claim.relation in {"change", "conflict"} and len(claim.evidence) == 2
+        for claim in draft.claims
+    )
+    if has_comparison_claim:
+        return True
+    if question is not None and _CONFLICT_SEEKING_QUESTION.search(question) is not None:
+        return False
+    cited_blocks = {
+        reference.block_id for claim in draft.claims for reference in claim.evidence
+    }
+    return len(draft.claims) >= 2 and len(cited_blocks) >= 2
+
+
+def _publication_has_complete_comparison(
+    publication: PublicationResult,
+    *,
+    question: str,
+) -> bool:
+    if any(
+        claim.relation in {"change", "conflict"} and len(claim.citations) == 2
+        for claim in publication.claims
+    ):
+        return True
+    if _CONFLICT_SEEKING_QUESTION.search(question) is not None:
+        return False
+    cited_blocks = {
+        citation.block_id for claim in publication.claims for citation in claim.citations
+    }
+    return len(publication.claims) >= 2 and len(cited_blocks) >= 2
+
+
+def _deterministic_comparison_recovery(
+    passages: tuple[PassageRecord, ...],
+    *,
+    idempotency_key: str,
+    question: str,
+) -> AnswerDraft | None:
+    """Recover a narrow two-branch comparison from explicit scalar evidence.
+
+    This fallback is intentionally conservative: each branch must expose exactly
+    one value of the same scalar kind, values must differ, and the branches must
+    come from distinct source files. It is used only after a comparison model has
+    twice omitted a requested branch.
+    """
+
+    if _BROAD_COMPARISON_QUESTION.search(question) is not None:
+        return None
+
+    by_kind: dict[str, list[tuple[PassageRecord, str, str]]] = {}
+    for passage in passages:
+        values = _explicit_comparable_values(passage.exact_quote)
+        for kind in {kind for kind, _, _ in values}:
+            same_kind = [item for item in values if item[0] == kind]
+            if len(same_kind) != 1:
+                continue
+            _, raw_value, canonical_value = same_kind[0]
+            by_kind.setdefault(kind, []).append((passage, raw_value, canonical_value))
+
+    for kind in ("currency", "percent", "date", "identifier", "number", "status"):
+        question_tokens = _query_tokens(question)
+        candidates = sorted(
+            by_kind.get(kind, []),
+            key=lambda item: (
+                _token_coverage(
+                    "\n".join((*item[0].path, item[0].source_name)),
+                    tokens=question_tokens,
+                ),
+                -len(item[0].exact_quote),
+            ),
+            reverse=True,
+        )
+        for left_index, left in enumerate(candidates):
+            for right in candidates[left_index + 1 :]:
+                if left[0].drive_file_id == right[0].drive_file_id:
+                    continue
+                if left[2] == right[2]:
+                    continue
+                claim_text = f"{left[1]} / {right[1]}"
+                return AnswerDraft(
+                    claims=[
+                        ClaimDraft(
+                            claim_id=uuid5(
+                                _COMPARISON_RECOVERY_NAMESPACE,
+                                f"{idempotency_key}:{left[0].block_id}:{right[0].block_id}",
+                            ),
+                            evidence=[
+                                DraftEvidenceRef(
+                                    block_id=left[0].block_id,
+                                    entity="requested subject",
+                                    exact_quote=left[0].exact_quote,
+                                    field="requested field",
+                                    scope=question[:240],
+                                    value=left[1],
+                                ),
+                                DraftEvidenceRef(
+                                    block_id=right[0].block_id,
+                                    entity="requested subject",
+                                    exact_quote=right[0].exact_quote,
+                                    field="requested field",
+                                    scope=question[:240],
+                                    value=right[1],
+                                ),
+                            ],
+                            relation="conflict",
+                            text=claim_text[:800],
+                        )
+                    ],
+                    summary=(
+                        "Recovered both explicitly requested comparison branches "
+                        "from distinct source evidence."
+                    ),
+                )
+    return None
+
+
+def _comparison_recovery_draft(
+    candidates: list[RetrievedBlock],
+    *,
+    passages: tuple[PassageRecord, ...],
+    idempotency_key: str,
+    question: str,
+) -> AnswerDraft | None:
+    if _BROAD_COMPARISON_QUESTION.search(question) is not None:
+        return _deterministic_reconciliation_recovery(
+            candidates,
+            idempotency_key=idempotency_key,
+            question=question,
+        )
+    return _deterministic_comparison_recovery(
+        passages,
+        idempotency_key=idempotency_key,
+        question=question,
+    )
+
+
+def _deterministic_reconciliation_recovery(
+    candidates: list[RetrievedBlock],
+    *,
+    idempotency_key: str,
+    question: str,
+) -> AnswerDraft | None:
+    """Recover enumerated mismatches from a source-backed reconciliation table.
+
+    The matrix supplies the field and the two named scopes, while each published
+    branch must still be corroborated in a distinct underlying document version.
+    This keeps the fallback folder-agnostic and publication-safe.
+    """
+
+    claims: list[ClaimDraft] = []
+    seen_fields: set[str] = set()
+    for matrix in candidates:
+        lines = [line.strip() for line in matrix.text.splitlines() if line.strip()]
+        for header_index, header in enumerate(lines):
+            header_cells = [cell.strip() for cell in header.split("\t")]
+            if len(header_cells) < 3 or not re.search(
+                r"\b(?:field|item|term|coverage|condition)\b",
+                header_cells[0],
+                re.IGNORECASE,
+            ):
+                continue
+            left_scope, right_scope = header_cells[1], header_cells[2]
+            for row in lines[header_index + 1 :]:
+                cells = [cell.strip() for cell in row.split("\t")]
+                if len(cells) < 3:
+                    break
+                field, left_cell, right_cell = cells[:3]
+                left_values = _explicit_comparable_values(left_cell)
+                right_values = _explicit_comparable_values(right_cell)
+                if len(left_values) != 1 or len(right_values) != 1:
+                    continue
+                left_kind, left_raw, left_canonical = left_values[0]
+                right_kind, right_raw, right_canonical = right_values[0]
+                if left_kind != right_kind or left_canonical == right_canonical:
+                    continue
+                status = " ".join(cells[3:]).casefold()
+                if status and re.search(r"\b(?:match(?:es)?|resolved|same)\b", status):
+                    continue
+                field_key = " ".join(_query_tokens(field))
+                if not field_key or field_key in seen_fields:
+                    continue
+                left_branch = _find_reconciliation_branch(
+                    candidates,
+                    excluded_source_file_id=matrix.source_file_id,
+                    field=field,
+                    raw_value=left_raw,
+                    scope=left_scope,
+                )
+                right_branch = _find_reconciliation_branch(
+                    candidates,
+                    excluded_source_file_id=matrix.source_file_id,
+                    field=field,
+                    raw_value=right_raw,
+                    scope=right_scope,
+                )
+                if (
+                    left_branch is None
+                    or right_branch is None
+                    or left_branch[0].source_file_id == right_branch[0].source_file_id
+                ):
+                    continue
+                applicability_scope = question[:240]
+                claims.append(
+                    ClaimDraft(
+                        claim_id=uuid5(
+                            _COMPARISON_RECOVERY_NAMESPACE,
+                            f"{idempotency_key}:{field_key}:{left_branch[0].block_id}:"
+                            f"{right_branch[0].block_id}",
+                        ),
+                        evidence=[
+                            DraftEvidenceRef(
+                                block_id=left_branch[0].block_id,
+                                entity="requested subject",
+                                exact_quote=left_branch[1],
+                                field=field[:120],
+                                scope=applicability_scope,
+                                value=left_raw,
+                            ),
+                            DraftEvidenceRef(
+                                block_id=right_branch[0].block_id,
+                                entity="requested subject",
+                                exact_quote=right_branch[1],
+                                field=field[:120],
+                                scope=applicability_scope,
+                                value=right_raw,
+                            ),
+                        ],
+                        relation="conflict",
+                        text=f"{field}: {left_raw} / {right_raw}"[:800],
+                    )
+                )
+                seen_fields.add(field_key)
+                if len(claims) == 3:
+                    return AnswerDraft(
+                        claims=claims,
+                        summary=(
+                            "Recovered mismatched fields from corroborated source evidence."
+                        ),
+                    )
+    if not claims:
+        return None
+    return AnswerDraft(
+        claims=claims,
+        summary="Recovered mismatched fields from corroborated source evidence.",
+    )
+
+
+def _find_reconciliation_branch(
+    candidates: list[RetrievedBlock],
+    *,
+    excluded_source_file_id: UUID,
+    field: str,
+    raw_value: str,
+    scope: str,
+) -> tuple[RetrievedBlock, str] | None:
+    field_tokens = _query_tokens(field)
+    scope_tokens = _query_tokens(scope)
+    matches: list[tuple[tuple[int, int, int], RetrievedBlock, str]] = []
+    for candidate in candidates:
+        if (
+            candidate.source_file_id == excluded_source_file_id
+            or raw_value not in candidate.text
+        ):
+            continue
+        exact_quote = _field_value_quote(
+            candidate.text,
+            field_tokens=field_tokens,
+            raw_value=raw_value,
+        )
+        if exact_quote is None:
+            continue
+        matches.append(
+            (
+                (
+                    _token_coverage(
+                        "\n".join((*candidate.path, candidate.source_name)),
+                        tokens=scope_tokens,
+                    ),
+                    _token_coverage(exact_quote, tokens=field_tokens),
+                    -len(exact_quote),
+                ),
+                candidate,
+                exact_quote,
+            )
+        )
+    if not matches:
+        return None
+    _, candidate, exact_quote = max(matches, key=lambda item: item[0])
+    return candidate, exact_quote
+
+
+def _field_value_quote(
+    text: str,
+    *,
+    field_tokens: tuple[str, ...],
+    raw_value: str,
+) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    matches: list[tuple[tuple[int, int], str]] = []
+    for line_index in range(len(lines)):
+        for width in range(1, min(3, len(lines) - line_index) + 1):
+            quote = "\n".join(lines[line_index : line_index + width])
+            if raw_value not in quote:
+                continue
+            coverage = _token_coverage(quote, tokens=field_tokens)
+            if field_tokens and coverage == 0:
+                continue
+            matches.append(((coverage, -len(quote)), quote))
+    return max(matches, key=lambda item: item[0])[1] if matches else None
+
+
+def _explicit_comparable_values(text: str) -> list[tuple[str, str, str]]:
+    matches: list[tuple[int, int, str, str, str]] = []
+
+    def add(kind: str, match: re.Match[str], canonical: str | None = None) -> None:
+        raw = match.group(0).strip()
+        matches.append((match.start(), match.end(), kind, raw, canonical or raw.casefold()))
+
+    for match in (*_CURRENCY_AMOUNT.finditer(text), *_SUFFIXED_CURRENCY_AMOUNT.finditer(text)):
+        try:
+            amount = Decimal(match.group("amount").replace(",", "")).normalize()
+        except InvalidOperation:
+            continue
+        add("currency", match, f"{match.group('currency').upper()}:{amount}")
+    for match in _PERCENT_VALUE.finditer(text):
+        add("percent", match, match.group(0).replace(" ", ""))
+    for match in (*_ISO_DATE_VALUE.finditer(text), *_MONTH_DATE_VALUE.finditer(text)):
+        add("date", match)
+    for match in _IDENTIFIER_VALUE.finditer(text):
+        add("identifier", match)
+    for match in _FORMATTED_NUMBER.finditer(text):
+        add("number", match, match.group(0).replace(",", ""))
+    for match in _EXPLICIT_VALUE_STATUS.finditer(text):
+        add("status", match)
+
+    # Prefer the typed outer value when a numeric token is nested inside it.
+    filtered: list[tuple[int, int, str, str, str]] = []
+    for item in sorted(matches, key=lambda value: (value[0], -(value[1] - value[0]))):
+        if any(item[0] >= kept[0] and item[1] <= kept[1] for kept in filtered):
+            continue
+        filtered.append(item)
+    return [(kind, raw, canonical) for _, _, kind, raw, canonical in filtered]
+
+
 def _can_fallback_from_structured(question: str, *, plan: QueryPlan) -> bool:
     """Allow scalar narrative facts to survive an unavailable table executor.
 
@@ -1134,8 +1674,12 @@ def _resolve_conflict_authority(
     *,
     blocks: Sequence[EvidenceBlock],
     draft: AnswerDraft,
+    question: str,
 ) -> PublicationResult:
     """Prefer explicit controlled evidence without filename or recency heuristics."""
+
+    if not _question_requests_authoritative_value(question):
+        return publication
 
     blocks_by_id = {block.block_id: block for block in blocks}
     drafts_by_id = {claim.claim_id: claim for claim in draft.claims}
@@ -1266,6 +1810,10 @@ def _authority_recovery_question(question: str) -> str:
         "approved evidence, return one atomic conflict claim per requested current "
         "field with both evidence branches. Do not repeat only the premise."
     )
+
+
+def _question_requests_authoritative_value(question: str) -> bool:
+    return _AUTHORITATIVE_VALUE_QUESTION.search(question) is not None
 
 
 def _reference_authority_score(
@@ -1436,8 +1984,6 @@ def _material_value_anchor(
             assignments.append((label_start, value_end))
     if assignments:
         return min(assignments, key=lambda span: span[1] - span[0])
-    if assignment_token_sequences is not None:
-        return None
 
     signals = [
         *((match.span(), 120) for match in _CURRENCY_AMOUNT.finditer(text)),
@@ -1527,9 +2073,9 @@ def _query_tokens(question: str) -> tuple[str, ...]:
     counts = Counter(
         token
         for token in (match.group(0).casefold() for match in _TOKEN.finditer(question))
-        if len(token) >= 2 and token not in _STOPWORDS
+        if (len(token) >= 2 or token.isdigit()) and token not in _STOPWORDS
     )
-    return tuple(token for token, _ in counts.most_common(8))
+    return tuple(token for token, _ in counts.most_common(12))
 
 
 def _suffix_token_sequences(tokens: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
@@ -1584,7 +2130,7 @@ def _normalized_text_token_spans(text: str) -> list[tuple[str, int, int]]:
     return [
         (match.group(0).casefold(), match.start(), match.end())
         for match in _TOKEN.finditer(text)
-        if len(match.group(0)) >= 2
+        if len(match.group(0)) >= 2 or match.group(0).isdigit()
     ]
 
 
@@ -1592,12 +2138,24 @@ def _select_passages(
     candidates: list[RetrievedBlock],
     *,
     assignment_token_sequences: tuple[tuple[str, ...], ...] | None = None,
+    excerpt_limit: int = _PASSAGE_EXCERPT_LIMIT,
     prefer_value_evidence: bool = False,
     require_token_match: bool = True,
     tokens: tuple[str, ...],
 ) -> tuple[PassageRecord, ...]:
+    broad_comparison = excerpt_limit > _PASSAGE_EXCERPT_LIMIT
     coverage_by_block = {
-        candidate.block_id: _token_coverage(candidate.text, tokens=tokens)
+        candidate.block_id: _token_coverage(
+            "\n".join((*candidate.path, candidate.source_name, candidate.text)),
+            tokens=tokens,
+        )
+        for candidate in candidates
+    }
+    source_coverage_by_block = {
+        candidate.block_id: _token_coverage(
+            "\n".join((*candidate.path, candidate.source_name)),
+            tokens=tokens,
+        )
         for candidate in candidates
     }
     strongest_coverage = max(coverage_by_block.values(), default=0)
@@ -1610,20 +2168,21 @@ def _select_passages(
         )
         for candidate in candidates
     }
-    enforce_material_evidence = prefer_value_evidence and any(
+    has_material_evidence = prefer_value_evidence and any(
         anchor is not None for anchor in material_by_block.values()
     )
-    if require_token_match and strongest_coverage == 0 and not enforce_material_evidence:
+    if require_token_match and strongest_coverage == 0 and not has_material_evidence:
         return ()
-    if enforce_material_evidence:
+    if has_material_evidence:
         minimum_coverage = 0
     selected: list[PassageRecord] = []
     per_source: Counter[UUID] = Counter()
     ranked_candidates = sorted(
         enumerate(candidates),
         key=lambda item: (
-            coverage_by_block[item[1].block_id],
             int(prefer_value_evidence and material_by_block[item[1].block_id] is not None),
+            source_coverage_by_block[item[1].block_id] if broad_comparison else 0,
+            coverage_by_block[item[1].block_id],
             -item[0],
         ),
         reverse=True,
@@ -1631,13 +2190,13 @@ def _select_passages(
     for _, candidate in ranked_candidates:
         if coverage_by_block[candidate.block_id] < minimum_coverage:
             continue
-        if enforce_material_evidence and material_by_block[candidate.block_id] is None:
-            continue
-        if per_source[candidate.source_file_id] >= _PASSAGE_PER_SOURCE_LIMIT:
+        per_source_limit = 2 if broad_comparison else _PASSAGE_PER_SOURCE_LIMIT
+        if per_source[candidate.source_file_id] >= per_source_limit:
             continue
         start, end = _excerpt_span(
             candidate.text,
             assignment_token_sequences=assignment_token_sequences,
+            excerpt_limit=excerpt_limit,
             prefer_value_evidence=prefer_value_evidence,
             tokens=tokens,
         )
@@ -1691,10 +2250,12 @@ def _locator_label(passage: PassageRecord) -> str:
 def _evidence_blocks(
     candidates: list[RetrievedBlock],
     *,
+    additional_block_ids: set[UUID] | None = None,
     passages: tuple[PassageRecord, ...],
     context: QueryContext,
 ) -> list[EvidenceBlock]:
     included = {passage.block_id for passage in passages}
+    included.update(additional_block_ids or ())
     blocks: list[EvidenceBlock] = []
     for candidate in candidates:
         if candidate.block_id not in included:
@@ -1832,60 +2393,89 @@ def _excerpt_span(
     text: str,
     *,
     assignment_token_sequences: tuple[tuple[str, ...], ...] | None = None,
+    excerpt_limit: int = _PASSAGE_EXCERPT_LIMIT,
     prefer_value_evidence: bool = False,
     tokens: tuple[str, ...],
 ) -> tuple[int, int]:
     best_span = (0, 0)
-    best_score = (0, 0, 0)
+    best_score = (0, 0, 0, 0, 0)
+    line_spans: list[tuple[int, int]] = []
     for line in re.finditer(r"[^\n]+", text):
         start, end = line.span()
         while start < end and text[start].isspace():
             start += 1
         while end > start and text[end - 1].isspace():
             end -= 1
-        candidate_text = text[start:end]
-        candidate_tokens = [
-            token for token, _, _ in _normalized_text_token_spans(candidate_text)
-        ]
-        material_value = int(
-            prefer_value_evidence
-            and _contains_material_value_evidence(
-                candidate_text,
-                assignment_token_sequences=assignment_token_sequences,
-                tokens=tokens,
+        if end > start:
+            line_spans.append((start, end))
+
+    for line_index, (line_start, _) in enumerate(line_spans):
+        for width in range(1, min(3, len(line_spans) - line_index) + 1):
+            start = line_start
+            end = line_spans[line_index + width - 1][1]
+            candidate_text = text[start:end]
+            candidate_tokens = [
+                token for token, _, _ in _normalized_text_token_spans(candidate_text)
+            ]
+            material_value = int(
+                prefer_value_evidence
+                and _contains_material_value_evidence(
+                    candidate_text,
+                    assignment_token_sequences=assignment_token_sequences,
+                    tokens=tokens,
+                )
             )
-        )
-        if (
-            prefer_value_evidence
-            and not material_value
-            and _STRONG_ASSIGNMENT_SEPARATOR.search(candidate_text) is not None
-        ):
-            continue
-        token_coverage = sum(
-            any(tokens_equivalent(query_token, text_token) for text_token in candidate_tokens)
-            for query_token in tokens
-        )
-        occurrence_count = sum(
-            any(tokens_equivalent(query_token, text_token) for query_token in tokens)
-            for text_token in candidate_tokens
-        )
-        score = (
-            material_value,
-            token_coverage,
-            occurrence_count,
-        )
-        if score > best_score:
-            best_score = score
-            best_span = (start, end)
+            direct_assignment = int(
+                bool(material_value)
+                and _STRONG_ASSIGNMENT_SEPARATOR.search(candidate_text) is not None
+            )
+            forward_value = int(
+                bool(material_value)
+                and _query_term_precedes_value(candidate_text, tokens=tokens)
+            )
+            if (
+                prefer_value_evidence
+                and not material_value
+                and _STRONG_ASSIGNMENT_SEPARATOR.search(candidate_text) is not None
+            ):
+                continue
+            token_coverage = sum(
+                any(
+                    tokens_equivalent(query_token, text_token)
+                    for text_token in candidate_tokens
+                )
+                for query_token in tokens
+            )
+            score = (
+                direct_assignment,
+                material_value,
+                forward_value,
+                token_coverage,
+                -(end - start),
+            )
+            if score > best_score:
+                best_score = score
+                best_span = (start, end)
     start, end = best_span
     if end <= start:
         if prefer_value_evidence:
-            return (0, 0)
+            # Categorical comparisons (for example, Silver versus Gold) still
+            # have useful evidence even when none of the values match the
+            # numeric/date material-value patterns.
+            return _excerpt_span(
+                text,
+                assignment_token_sequences=assignment_token_sequences,
+                excerpt_limit=excerpt_limit,
+                prefer_value_evidence=False,
+                tokens=tokens,
+            )
         first_line = re.search(r"\S[^\n]*", text)
         if first_line is None:
             return (0, 0)
         start, end = first_line.span()
-    if end - start <= _PASSAGE_EXCERPT_LIMIT:
+    if excerpt_limit > _PASSAGE_EXCERPT_LIMIT:
+        return _expanded_context_span(text, start=start, end=end, limit=excerpt_limit)
+    if end - start <= excerpt_limit:
         return start, end
 
     anchor = (
@@ -1908,12 +2498,12 @@ def _excerpt_span(
     anchor_start, anchor_end = start + anchor[0], start + anchor[1]
     narrowed_start = max(
         start,
-        min(anchor_start - 80, end - _PASSAGE_EXCERPT_LIMIT),
+        min(anchor_start - 80, end - excerpt_limit),
     )
-    narrowed_end = min(end, narrowed_start + _PASSAGE_EXCERPT_LIMIT)
+    narrowed_end = min(end, narrowed_start + excerpt_limit)
     if anchor_end > narrowed_end:
         narrowed_end = min(end, anchor_end + 80)
-        narrowed_start = max(start, narrowed_end - _PASSAGE_EXCERPT_LIMIT)
+        narrowed_start = max(start, narrowed_end - excerpt_limit)
 
     if narrowed_start > start:
         next_space = text.find(" ", narrowed_start, min(narrowed_start + 24, anchor_start))
@@ -1924,6 +2514,57 @@ def _excerpt_span(
         if previous_space >= 0:
             narrowed_end = previous_space
     return narrowed_start, narrowed_end
+
+
+def _expanded_context_span(text: str, *, start: int, end: int, limit: int) -> tuple[int, int]:
+    before = min(start, limit // 10)
+    context_start = start - before
+    context_end = min(len(text), context_start + limit)
+    if end > context_end:
+        context_end = min(len(text), end + limit // 4)
+        context_start = max(0, context_end - limit)
+    if context_end - context_start < limit:
+        context_start = max(0, context_end - limit)
+    if context_start > 0:
+        next_newline = text.find("\n", context_start, start)
+        if next_newline >= 0:
+            context_start = next_newline + 1
+    if context_end < len(text):
+        previous_newline = text.rfind("\n", end, context_end)
+        if previous_newline >= 0:
+            context_end = previous_newline
+    return context_start, context_end
+
+
+def _query_term_precedes_value(text: str, *, tokens: tuple[str, ...]) -> bool:
+    anchor_tokens = tuple(
+        token for token in tokens if len(token) >= 3 and token not in _VALUE_ANCHOR_QUERY_NOISE
+    )
+    query_spans = [
+        (start, end)
+        for text_token, start, end in _normalized_text_token_spans(text)
+        if any(tokens_equivalent(query_token, text_token) for query_token in anchor_tokens)
+    ]
+    value_starts = [
+        match.start()
+        for pattern in (
+            _CURRENCY_AMOUNT,
+            _SUFFIXED_CURRENCY_AMOUNT,
+            _PERCENT_VALUE,
+            _ISO_DATE_VALUE,
+            _MONTH_DATE_VALUE,
+            _EMAIL_VALUE,
+            _URL_VALUE,
+            _IDENTIFIER_VALUE,
+            _FORMATTED_NUMBER,
+        )
+        for match in pattern.finditer(text)
+    ]
+    return any(
+        0 <= value_start - token_end <= 120
+        for _, token_end in query_spans
+        for value_start in value_starts
+    )
 
 
 def _token_coverage(text: str, *, tokens: tuple[str, ...]) -> int:
