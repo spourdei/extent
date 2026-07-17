@@ -373,7 +373,13 @@ class QueryService:
                 question=normalized_question,
                 run_id=context.run_id,
             )
-            if analysis.status in {"complete", "incomplete"} and (
+            # Once the structured executor found relevant tables, its capability
+            # verdict is authoritative.  In particular, ``unsupported`` means a
+            # requested clause could not be compiled or executed; falling through
+            # to sampled retrieval/model generation would risk publishing a
+            # plausible but partial answer.  ``not_applicable`` remains the only
+            # status eligible for the narrow scalar-narrative fallback below.
+            if analysis.status in {"complete", "incomplete", "unsupported"} and (
                 query_plan.mode != "mixed" or "join" in query_plan.intents
             ):
                 return self._store_structured_analysis(
@@ -425,13 +431,17 @@ class QueryService:
                 question=normalized_question,
                 request=exhaustive_request,
             )
-        history = self._repository.list_results(
-            user_id=active_session.account.user_id,
-            workspace_id=workspace_id,
-            limit=2,
+        is_follow_up = _needs_bounded_context(normalized_question)
+        history = (
+            self._repository.list_results(
+                user_id=active_session.account.user_id,
+                workspace_id=workspace_id,
+                limit=2,
+            )
+            if is_follow_up
+            else []
         )
         model_history = _model_history(history)
-        is_follow_up = _needs_bounded_context(normalized_question)
         if is_follow_up and not any(turn.claim_summaries for turn in model_history):
             stored = self._repository.store_publication_result(
                 claims=(),
