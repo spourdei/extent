@@ -160,19 +160,45 @@ Run the full repository check:
 pnpm check
 ```
 
-This runs formatting, linting, strict Python and TypeScript type checks, focused unit tests,
-migration and OpenAPI/client drift checks, and the production Next.js build.
+This runs formatting, linting, strict Python and TypeScript type checks, the frozen publication
+evaluation, the OpenAI Evals contract validation, focused unit tests, migration and
+OpenAPI/client drift checks, and the production Next.js build.
 
 Focused commands:
 
-| Command              | What it checks                                       |
-| -------------------- | ---------------------------------------------------- |
-| `pnpm lint`          | Python and TypeScript lint rules                     |
-| `pnpm typecheck`     | Strict mypy and TypeScript checks                    |
-| `pnpm test`          | Focused API and browser-boundary unit tests          |
-| `pnpm migrate:check` | The Alembic revision graph and single migration head |
-| `pnpm openapi:check` | The OpenAPI document and generated TypeScript client |
-| `pnpm build`         | The production Next.js build                         |
+| Command                     | What it checks                                                    |
+| --------------------------- | ----------------------------------------------------------------- |
+| `pnpm lint`                 | Python and TypeScript lint rules                                  |
+| `pnpm typecheck`            | Strict mypy and TypeScript checks                                 |
+| `pnpm eval:check`           | Twelve frozen publication-policy cases and report drift           |
+| `pnpm eval:openai:validate` | The twelve-case live system-eval contract and golden source files |
+| `pnpm eval:live`            | Opt-in live answer-model and embedding-provider smoke tests       |
+| `pnpm eval:openai`          | Opt-in authenticated end-to-end suite through OpenAI Evals        |
+| `pnpm test`                 | Focused API and browser-boundary unit tests                       |
+| `pnpm migrate:check`        | The Alembic revision graph and single migration head              |
+| `pnpm openapi:check`        | The OpenAPI document and generated TypeScript client              |
+| `pnpm build`                | The production Next.js build                                      |
+
+### Model and publication evaluations
+
+The credential-free frozen evaluation runs twelve sanitized model-draft cases through the same
+deterministic publication authority used by the query service. It covers valid PDF and text
+locators, invented numbers and dates, unknown and cross-workspace evidence, repeated ambiguous
+quotes, supported changes and conflicts, scope mismatch, partial coverage, and hostile source
+instructions. The checked-in report records twelve passing cases and no failures.
+
+`pnpm eval:live` uses `Settings()` to call the configured answer and embedding providers. It is
+opt-in because it makes real provider requests and may incur cost. The smoke verifies that the
+answer model returns a schema-valid evidence draft and that fresh 1,536-dimensional embeddings
+rank the expected document first. Credentials are never printed or included in assertion text.
+
+The optional OpenAI Evals harness exercises Extent through the same authenticated workspace
+question endpoint used by the frontend. Its deterministic grader measures answer accuracy,
+citation integrity, uncertainty handling, publication-policy compliance, and the all-dimensions
+pass rate without using a second judge model. Casebook validation runs in `pnpm check`; the live
+suite remains separate because it requires a ready four-file golden Drive workspace, an active
+session, and paid provider calls. See the
+[OpenAI Evals runbook](apps/api/evals/openai/README.md) for setup and safe credential handling.
 
 ## Deployment
 

@@ -1,0 +1,14 @@
+extent-evidence-answering:
+  id: extent-evidence-answering.dev.v1
+  description: End-to-end evaluation of Extent answers, citations, uncertainty, and publication policy.
+  metrics:
+    - pass_rate
+    - answer_accuracy
+    - citation_integrity
+    - uncertainty_handling
+    - policy_compliance
+
+extent-evidence-answering.dev.v1:
+  class: extent_openai_evals.evaluator:ExtentEvidenceEval
+  args:
+    samples_jsonl: extent_evidence_answering/samples.jsonl

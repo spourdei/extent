@@ -1,0 +1,6 @@
+Work_ID,Team,Owner,Planned_Units,Actual_Units,Amount_USD,State
+W-001,North,Ada,10,10,120,Complete
+W-002,North,Ben,8,6,90,Open
+W-002,South,Dara,2,1,30,Held
+W-003,South,Ada,12,13,150,Complete
+W-004,South,Cleo,5,4,70,Open

@@ -106,3 +106,14 @@ Run `pnpm migrate:check` without a database to verify the single migration head.
 release, run `pnpm migrate` once, then verify the deployed `alembic_version` equals the repository
 head. Run the API and RQ worker as separate native processes from the same Python package. Do not
 expose database or Redis credentials to Next.js/browser code.
+
+## Evaluations
+
+`pnpm eval:check` runs the twelve-case frozen publication-policy regression and verifies that the
+checked-in report has not drifted. `pnpm eval:openai:validate` validates the twelve-case system
+casebook and its golden source corpus without making provider requests. Both run in `pnpm check`.
+
+`pnpm eval:live` is an opt-in provider smoke that loads credentials only through `Settings()` and
+makes live answer-model and embedding requests. `pnpm eval:openai` is the separate authenticated
+end-to-end system suite; it exercises the real workspace question endpoint and may make paid
+provider requests. See [`evals/openai/README.md`](evals/openai/README.md) before running it.

@@ -1,0 +1,2 @@
+extent/http:
+  class: extent_openai_evals.completion:ExtentHttpCompletionFn

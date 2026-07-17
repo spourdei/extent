@@ -1,0 +1,154 @@
+{
+  "cases": [
+    {
+      "actual": {
+        "approved_relations": ["fact"],
+        "citation_locators": ["pdf:2:19-42"],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "evidence_supported",
+        "suppression_reasons": []
+      },
+      "case_id": "pdf-locator-round-trip",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": ["fact"],
+        "citation_locators": ["lines:11-11:15-38"],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "evidence_supported",
+        "suppression_reasons": []
+      },
+      "case_id": "text-locator-round-trip",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "insufficient",
+        "suppression_reasons": ["unknown_evidence_block"]
+      },
+      "case_id": "unknown-citation-fails-closed",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "insufficient",
+        "suppression_reasons": ["claim_value_not_evidenced", "unsupported_claim_token"]
+      },
+      "case_id": "invented-number-fails-closed",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "insufficient",
+        "suppression_reasons": ["claim_value_not_evidenced", "unsupported_claim_token"]
+      },
+      "case_id": "invented-date-fails-closed",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "insufficient",
+        "suppression_reasons": ["ambiguous_exact_quote"]
+      },
+      "case_id": "ambiguous-quote-fails-closed",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": ["change"],
+        "citation_locators": ["lines:11-12:15-62", "pdf:2:19-66"],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "changed",
+        "suppression_reasons": []
+      },
+      "case_id": "ordered-change-publishes",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": ["conflict"],
+        "citation_locators": ["lines:11-11:15-38", "pdf:2:19-42"],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "conflict",
+        "suppression_reasons": []
+      },
+      "case_id": "matching-conflict-publishes",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": ["unclear"],
+        "citation_locators": ["lines:11-11:15-38", "pdf:2:19-42"],
+        "coverage_gap_reasons": [],
+        "policy_notes": ["comparison_applicability_mismatch"],
+        "status": "evidence_supported",
+        "suppression_reasons": []
+      },
+      "case_id": "scope-mismatch-downgrades",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": ["unsupported"],
+        "policy_notes": [],
+        "status": "coverage_limited",
+        "suppression_reasons": []
+      },
+      "case_id": "partial-coverage-abstains-honestly",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "insufficient",
+        "suppression_reasons": ["evidence_outside_authorized_run"]
+      },
+      "case_id": "other-workspace-evidence-rejected",
+      "passed": true
+    },
+    {
+      "actual": {
+        "approved_relations": [],
+        "citation_locators": [],
+        "coverage_gap_reasons": [],
+        "policy_notes": [],
+        "status": "insufficient",
+        "suppression_reasons": ["unsafe_evidence_instruction"]
+      },
+      "case_id": "hostile-evidence-remains-data",
+      "passed": true
+    }
+  ],
+  "failed_case_ids": [],
+  "failed_cases": 0,
+  "manifest_version": "extent-frozen-eval-v1",
+  "passed_cases": 12,
+  "policy_version": "publication-policy-v1",
+  "total_cases": 12
+}
