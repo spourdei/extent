@@ -23,5 +23,6 @@ The app opens at `http://localhost:3000`. In development it proxies `/api/backen
 ```bash
 pnpm lint:web
 pnpm typecheck:web
+pnpm test:web
 pnpm build:check
 ```

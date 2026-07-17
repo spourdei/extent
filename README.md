@@ -158,8 +158,8 @@ Run the full repository check:
 pnpm check
 ```
 
-This runs formatting, linting, strict Python and TypeScript type checks, migration and
-OpenAPI/client drift checks, and the production Next.js build.
+This runs formatting, linting, strict Python and TypeScript type checks, focused unit tests,
+migration and OpenAPI/client drift checks, and the production Next.js build.
 
 Focused commands:
 
@@ -167,6 +167,7 @@ Focused commands:
 | -------------------- | ---------------------------------------------------- |
 | `pnpm lint`          | Python and TypeScript lint rules                     |
 | `pnpm typecheck`     | Strict mypy and TypeScript checks                    |
+| `pnpm test`          | Focused API and browser-boundary unit tests          |
 | `pnpm migrate:check` | The Alembic revision graph and single migration head |
 | `pnpm openapi:check` | The OpenAPI document and generated TypeScript client |
 | `pnpm build`         | The production Next.js build                         |

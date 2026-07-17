@@ -12,6 +12,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --no-build-isolation --no-deps -e apps/api
 .venv/bin/alembic -c apps/api/alembic.ini upgrade head
 .venv/bin/python apps/api/scripts/export_openapi.py --check
+.venv/bin/python -m pytest apps/api/tests
 .venv/bin/uvicorn extent_api.main:app --reload --reload-dir apps/api/src --app-dir apps/api/src
 ```
 

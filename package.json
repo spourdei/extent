@@ -15,7 +15,7 @@
   "scripts": {
     "build": "pnpm --filter @extent/web build",
     "build:check": "EXTENT_NEXT_DIST_DIR=.next-check pnpm --filter @extent/web build",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm migrate:check && pnpm openapi:check && pnpm build:check",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm migrate:check && pnpm openapi:check && pnpm build:check",
     "dev": "pnpm dev:web",
     "dev:api": ".venv/bin/python -m uvicorn extent_api.main:app --reload --reload-dir apps/api/src --app-dir apps/api/src",
     "dev:worker": ".venv/bin/python -m extent_api.worker",
@@ -40,6 +40,9 @@
     "openapi:client:generate": "openapi-typescript apps/api/openapi.json --output apps/web/src/generated/extent-api.ts --immutable --alphabetize && .venv/bin/python apps/api/scripts/export_openapi_schema_module.py",
     "openapi:generate": ".venv/bin/python apps/api/scripts/export_openapi.py && pnpm openapi:client:generate",
     "setup:api": "python3 -m venv .venv && .venv/bin/python -m pip install -r apps/api/requirements.lock && .venv/bin/python -m pip install --no-build-isolation --no-deps -e apps/api",
+    "test": "pnpm test:web && pnpm test:api",
+    "test:api": ".venv/bin/python -m pytest apps/api/tests",
+    "test:web": "vitest run",
     "typecheck": "pnpm typecheck:web && pnpm typecheck:api",
     "typecheck:api": "MYPYPATH=apps/api/typings .venv/bin/mypy apps/api/src",
     "typecheck:web": "pnpm --filter @extent/web typecheck"

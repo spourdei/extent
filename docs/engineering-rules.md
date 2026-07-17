@@ -1,6 +1,6 @@
 # Public Engineering Rules
 
-- Run `pnpm check` before handing off a coherent change. It covers formatting, linting, type checking, migration and OpenAPI drift, and the production web build for the active React/FastAPI system.
+- Run `pnpm check` before handing off a coherent change. It covers formatting, linting, type checking, focused unit tests, migration and OpenAPI drift, and the production web build for the active React/FastAPI system.
 - FastAPI is the sole backend authority. Network and provider SDK imports belong only in `apps/api` adapter modules; `apps/web` communicates with it over HTTP.
 - Pydantic models and OpenAPI define the wire contract. The React boundary still runtime-validates every response before rendering it.
 - Python may use snake_case internally, but the public JSON contract uses camelCase aliases and rejects unexpected fields.
