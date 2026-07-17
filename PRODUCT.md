@@ -1,51 +1,41 @@
-# Product notes
+# Product
 
-## Working direction
+## Register
 
-Extent is a web workspace for asking questions across one connected Google Drive folder.
+product
 
-The user chooses the folder. Drive access stays read-only, and the connected account still
-determines which files can be opened.
+## Platform
 
-## Core loop
+web
 
-1. Connect Google Drive and provide a folder link.
-2. Wait while Extent discovers and prepares supported files.
-3. Ask a question across the prepared material.
-4. Read a short answer and inspect the exact excerpts behind it.
+## Users
 
-Answers should cite source text and a useful location, such as a PDF page or text line.
-Evidence needs to remain inspectable after the answer is produced.
+Extent serves analysts and operators who reconcile facts across long, mixed, versioned document packets. They work under time pressure, often with several plausible values in front of them, and need to identify the applicable value, inspect its exact source, and recognize when the packet cannot support a conclusion.
 
-Do not present an unsupported claim as fact. If the available excerpts do not support a
-material statement, suppress it or explain the limit. A citation by itself does not prove
-that a value is current or controlling.
+## Product Purpose
 
-## Preparation
+Extent turns a connected folder into an evidence desk. It answers bounded cross-document questions as inspectable claims, preserves the lineage of every material value, keeps genuine conflicts visible, and explains when incomplete coverage prevents a safe answer. Success means a user can reach the right passage quickly without mistaking a fluent answer for proof.
 
-Folder preparation may take time. Show what is still being read, what is ready, and what
-failed. A partially prepared folder should not look complete.
+## Positioning
 
-The first useful release can focus on one folder per workspace and bounded answers. It does
-not need a general-purpose chat surface.
+Every material answer remains tied to an exact source version and reversible locator; unsupported conclusions never become presentation copy.
 
-## Complete-set questions
+## Brand Personality
 
-Some questions ask for every matching row or value, not the best few passages. Detect that
-scope before ordinary ranked retrieval. Complete-set answers must use a bounded,
-deterministic extraction pass and say when file coverage prevents a complete result.
+Calm, exacting, and quietly helpful. Extent is warm at the edges but literal around evidence, permissions, missing support, and failure. It behaves like a careful investigative partner rather than a theatrical assistant.
 
-CSV records and document bodies need stable locators just like PDF pages and text lines.
-If a request is too broad for the supported extraction shape, ask for a narrower subject or
-field instead of implying completeness.
+## Anti-references
 
-## Open questions
+Avoid generic chat-over-documents interfaces, ornamental agent theater, dense engineering dashboards in the primary workflow, decorative AI gradients, glass effects, nested cards, and confidence theater. The interface must not imply that a citation guarantees correctness or that a bounded search proves factual absence.
 
-- How should conflicts between plausible source values appear?
-- What counts as enough coverage to say that no answer exists?
-- Which file types can preserve stable evidence locations in the first release?
-- When should a broad question ask for clarification instead of searching?
-- How much prior question context should affect a follow-up?
+## Design Principles
 
-Keep these decisions close to retrieval and publication behavior. The interface should say
-what the system actually checked, not what a fluent answer implies.
+- Evidence before eloquence: every material pixel is downstream of the publication contract.
+- Progressive disclosure: the primary task stays simple while lineage and technical audit details remain one deliberate action away.
+- Safe states are useful states: partial coverage, unknown precedence, and degraded operation explain the next safe action.
+- Familiar controls, specific semantics: standard interaction patterns carry a precise evidence vocabulary.
+- Speed without hidden work: acknowledge immediately, load predictably, and never spend model budget before explicit intent.
+
+## Accessibility & Inclusion
+
+Meet WCAG 2.2 AA for the reviewed web surface. Support keyboard-only evidence inspection, visible focus, non-color status cues, reduced motion, selectable source text, 200% zoom, and mobile-width use without treating mobile as the primary review surface.
