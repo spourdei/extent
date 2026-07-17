@@ -18,10 +18,12 @@ python3 -m venv .venv
 
 Local API documentation is available at `http://127.0.0.1:8000/api/docs`.
 
-`EXTENT_DATABASE_URL` must use `postgresql+psycopg`. Render Postgres with pgvector is the
-deployed database; Render Key Value is the deployed Redis service. FastAPI, SQLAlchemy, and
-Alembic remain the application and schema authorities. `EXTENT_REDIS_URL` accepts `redis://`
-and `rediss://`, and both database and Redis credentials remain server-only.
+`EXTENT_DATABASE_URL` uses psycopg 3. The settings boundary accepts Render's native
+`postgresql://` connection string and normalizes it to `postgresql+psycopg://`; all other drivers
+fail closed. Render Postgres with pgvector is the deployed database, and Render Key Value is the
+deployed Redis service. FastAPI, SQLAlchemy, and Alembic remain the application and schema
+authorities. `EXTENT_REDIS_URL` accepts `redis://` and `rediss://`, and both database and Redis
+credentials remain server-only.
 
 Google OAuth uses the maintained Google Python libraries with state, PKCE, offline access, and
 the read-only Drive scope. Register

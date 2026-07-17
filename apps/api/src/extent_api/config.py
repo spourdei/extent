@@ -94,12 +94,16 @@ class Settings(BaseSettings):
         values.setdefault("_env_file", REPOSITORY_ENV_FILE)
         super().__init__(**values)
 
-    @field_validator("database_url", "database_migration_url")
+    @field_validator("database_url", "database_migration_url", mode="before")
     @classmethod
-    def require_psycopg_postgres(cls, value: str | None) -> str | None:
-        """Reject database URLs that bypass the supported Postgres driver."""
+    def require_psycopg_postgres(cls, value: Any) -> Any:
+        """Normalize platform URLs and reject unsupported database drivers."""
 
-        if value is not None and not value.startswith("postgresql+psycopg://"):
+        if value is None or not isinstance(value, str):
+            return value
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        if not value.startswith("postgresql+psycopg://"):
             raise ValueError("database URLs must use postgresql+psycopg")
         return value
 

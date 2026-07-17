@@ -21,6 +21,14 @@ from extent_api.services.publication import (
 
 _JSON_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 _MAX_RESPONSE_BYTES = 1_000_000
+_CHAT_COMPLETIONS_PATH = "/chat/completions"
+
+
+def _chat_completions_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith(_CHAT_COMPLETIONS_PATH):
+        return normalized
+    return f"{normalized}{_CHAT_COMPLETIONS_PATH}"
 
 
 class ModelPassage(BaseModel):
@@ -71,15 +79,13 @@ class UrlLibChatCompletionTransport:
     ) -> str:
         payload = json.dumps(
             {
-                "max_tokens": 2_200,
                 "messages": messages,
                 "model": model,
-                "temperature": 0.1,
             },
             ensure_ascii=False,
         ).encode()
         request = Request(
-            f"{base_url.rstrip('/')}/chat/completions",
+            _chat_completions_url(base_url),
             data=payload,
             headers={
                 "Accept": "application/json",

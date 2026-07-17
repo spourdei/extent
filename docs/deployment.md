@@ -1,6 +1,6 @@
 # Deployment topology
 
-Extent is designed to use one application topology in development and production:
+Extent uses one application topology in development and production:
 
 ```text
 Browser -> Vercel Next.js -> Render FastAPI -> Render Postgres/pgvector
@@ -9,12 +9,12 @@ Browser -> Vercel Next.js -> Render FastAPI -> Render Postgres/pgvector
 Render RQ worker ----------------------------^
 ```
 
-FastAPI and the RQ worker run as separate native Render processes from the same Python package.
-The worker host must also provide the Tesseract executable and English language data. Install it
-with `brew install tesseract` on macOS or `apt-get install tesseract-ocr` on Debian/Ubuntu.
+FastAPI and the RQ worker run as separate Dockerized Render services from the same Python package
+and checked-in image definition. The API runs Alembic before starting Uvicorn. The shared image
+provides the Tesseract executable and English language data required by worker startup.
 Postgres is the durable product-state authority; Redis is delivery infrastructure and may not be
 used as the only record of a product operation. Alembic migrations run once as an explicit
-release action, never during API or worker startup.
+API-start boundary before Uvicorn starts.
 
 The repository defines and checks these boundaries locally. A public Vercel-to-Render proxy,
 session-cookie, migration-revision, API, and worker smoke remains required before the topology can
@@ -22,11 +22,17 @@ be described as deployed.
 
 ## Render environment
 
-Configure these server-only values on both the API and worker where applicable:
+The root `render.yaml` creates the API, worker, Postgres database, Key Value instance, and a shared
+runtime group. Render prompts for the OAuth, provider, and encryption secrets during the first
+Blueprint import. Configure the two provider base URLs manually in that shared group so the
+endpoint remains deployment configuration instead of source-controlled vendor configuration. The
+Vercel origin is fixed to `https://extent-web.vercel.app`.
+
+Configure these server-only values on both services where applicable:
 
 - `EXTENT_ENVIRONMENT=production`
-- `EXTENT_DATABASE_URL`: Render Postgres internal URL rewritten from `postgresql://` to
-  `postgresql+psycopg://`
+- `EXTENT_DATABASE_URL`: Render Postgres internal URL; the settings boundary normalizes it from
+  `postgresql://` to `postgresql+psycopg://`
 - `EXTENT_REDIS_URL`: Render Key Value internal URL
 - `EXTENT_QUEUE_NAME=extent`
 - `EXTENT_ALLOWED_HOSTS`: the exact Render API service hostname, without a scheme, port, or
@@ -35,35 +41,41 @@ Configure these server-only values on both the API and worker where applicable:
 - `EXTENT_PUBLIC_WEB_ORIGIN`: the deployed Vercel origin; Google must register
   `<origin>/api/backend/v1/auth/google/callback`
 - `EXTENT_GOOGLE_CLIENT_ID` and `EXTENT_GOOGLE_CLIENT_SECRET`: Google web-client values
-- `EXTENT_CREDENTIAL_ENCRYPTION_KEYS`: newest-first versioned AEAD keys; configure the same
-  value on the API and worker
+- `EXTENT_CREDENTIAL_ENCRYPTION_KEYS`: newest-first versioned AEAD keys; configure the same value
+  on the API and worker
 - `EXTENT_MODEL_API_KEY`: server-only answer-model credential
-- `EXTENT_MODEL_BASE_URL=https://api.openai.com/v1`
-- `EXTENT_MODEL_NAME=gpt-5-mini`
-- `EXTENT_MODEL_TIMEOUT_SECONDS=120`
+- `EXTENT_MODEL_BASE_URL`: the HTTPS root of the selected OpenAI-compatible API; configure it in
+  the shared Render environment group
+- `EXTENT_MODEL_NAME=gemini-3.5-flash`
+- `EXTENT_MODEL_TIMEOUT_SECONDS=90`
 - `EXTENT_EMBEDDING_API_KEY`: server-only embedding credential; production refuses to start
   without it
-- `EXTENT_EMBEDDING_BASE_URL=https://api.openai.com/v1`
-- `EXTENT_EMBEDDING_MODEL=text-embedding-3-small`: the provider must honor OpenAI's
+- `EXTENT_EMBEDDING_BASE_URL`: the HTTPS root of the selected OpenAI-compatible API; configure it
+  in the shared Render environment group
+- `EXTENT_EMBEDDING_MODEL=text-embedding-3-large`: the provider must honor OpenAI's
   `dimensions` parameter; Extent requests and validates exactly 1,536 values
 - `EXTENT_QUERY_REQUESTS_PER_MINUTE=12`: atomic per-user question admission before provider
   work
 - `EXTENT_OCR_EXECUTABLE=tesseract`: worker-local OCR executable; worker startup fails when it
   is unavailable
 
-Production startup validates this capability set as one boundary. OAuth credentials, the
+Runtime startup validates this capability set as one boundary. OAuth credentials, the
 credential keyring, answer-model key, embedding key, non-loopback database and Redis URLs, and an
-exact HTTPS web/CORS origin must all be present before the API or worker can report healthy. The
+exact HTTPS web/CORS origin must all be present before the API and worker can report healthy. The
 ASGI edge also rejects Host headers outside the exact configured Render hostname allowlist.
 POST, PUT, and PATCH bodies are capped at 16 KiB while they are received, before JSON allocation,
 authentication, queue access, or provider work; declared and chunked oversize requests return 413.
 The separate Alembic release action validates its database URL but does not require runtime
 provider credentials.
 
+The adapters do not select a provider. A direct Gemini OpenAI-compatible endpoint remains a
+supported configuration when its base URL, API key, and compatible model names are supplied, but
+the production Blueprint does not hard-code or default to that endpoint.
+
 The API start command is:
 
 ```bash
-.venv/bin/python -m uvicorn extent_api.main:app --app-dir apps/api/src --host 0.0.0.0 --port "$PORT"
+.venv/bin/python -m extent_api.render_web
 ```
 
 The worker start command is:

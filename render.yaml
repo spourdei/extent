@@ -1,0 +1,121 @@
+projects:
+  - name: Extent
+    environments:
+      - name: Production
+        envVarGroups:
+          - name: extent-production-runtime
+            envVars:
+              - key: EXTENT_ENVIRONMENT
+                value: production
+              - key: EXTENT_API_TITLE
+                value: Extent API
+              - key: EXTENT_ALLOWED_ORIGINS
+                value: https://extent-web.vercel.app
+              - key: EXTENT_PUBLIC_WEB_ORIGIN
+                value: https://extent-web.vercel.app
+              - key: EXTENT_QUEUE_NAME
+                value: extent
+              - key: EXTENT_SESSION_COOKIE_NAME
+                value: extent_session
+              - key: EXTENT_QUERY_REQUESTS_PER_MINUTE
+                value: 12
+              - key: EXTENT_MODEL_NAME
+                value: gemini-3.5-flash
+              - key: EXTENT_EMBEDDING_MODEL
+                value: text-embedding-3-large
+              - key: EXTENT_MODEL_TIMEOUT_SECONDS
+                value: 90
+              - key: EXTENT_OCR_EXECUTABLE
+                value: tesseract
+        services:
+          - type: web
+            name: extent-api
+            runtime: docker
+            region: ohio
+            dockerfilePath: ./apps/api/Dockerfile
+            dockerCommand: python -m extent_api.render_web
+            healthCheckPath: /healthz
+            envVars:
+              - fromGroup: extent-production-runtime
+              - key: EXTENT_GOOGLE_CLIENT_ID
+                sync: false
+              - key: EXTENT_GOOGLE_CLIENT_SECRET
+                sync: false
+              - key: EXTENT_CREDENTIAL_ENCRYPTION_KEYS
+                sync: false
+              - key: EXTENT_MODEL_API_KEY
+                sync: false
+              - key: EXTENT_EMBEDDING_API_KEY
+                sync: false
+              - key: EXTENT_DATABASE_URL
+                fromDatabase:
+                  name: extent-postgres
+                  property: connectionString
+              - key: EXTENT_DATABASE_MIGRATION_URL
+                fromDatabase:
+                  name: extent-postgres
+                  property: connectionString
+              - key: EXTENT_REDIS_URL
+                fromService:
+                  name: extent-key-value
+                  type: keyvalue
+                  property: connectionString
+              - key: EXTENT_ALLOWED_HOSTS
+                fromService:
+                  name: extent-api
+                  type: web
+                  envVarKey: RENDER_EXTERNAL_HOSTNAME
+
+          - type: worker
+            name: extent-worker
+            runtime: docker
+            region: ohio
+            plan: starter
+            dockerfilePath: ./apps/api/Dockerfile
+            dockerCommand: python -m extent_api.worker
+            maxShutdownDelaySeconds: 300
+            envVars:
+              - fromGroup: extent-production-runtime
+              - key: EXTENT_GOOGLE_CLIENT_ID
+                sync: false
+              - key: EXTENT_GOOGLE_CLIENT_SECRET
+                sync: false
+              - key: EXTENT_CREDENTIAL_ENCRYPTION_KEYS
+                sync: false
+              - key: EXTENT_MODEL_API_KEY
+                sync: false
+              - key: EXTENT_EMBEDDING_API_KEY
+                sync: false
+              - key: EXTENT_DATABASE_URL
+                fromDatabase:
+                  name: extent-postgres
+                  property: connectionString
+              - key: EXTENT_DATABASE_MIGRATION_URL
+                fromDatabase:
+                  name: extent-postgres
+                  property: connectionString
+              - key: EXTENT_REDIS_URL
+                fromService:
+                  name: extent-key-value
+                  type: keyvalue
+                  property: connectionString
+              - key: EXTENT_ALLOWED_HOSTS
+                fromService:
+                  name: extent-api
+                  type: web
+                  envVarKey: RENDER_EXTERNAL_HOSTNAME
+
+          - type: keyvalue
+            name: extent-key-value
+            region: ohio
+            ipAllowList: []
+            maxmemoryPolicy: noeviction
+            persistenceMode: "off"
+
+        databases:
+          - name: extent-postgres
+            region: ohio
+            postgresMajorVersion: "17"
+            databaseName: extent
+            user: extent
+            ipAllowList: []

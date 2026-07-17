@@ -174,26 +174,29 @@ Focused commands:
 
 ## Deployment
 
-The production layout uses Vercel for Next.js and Render for FastAPI, the worker, Postgres with
+The production layout uses Vercel for Next.js and Render for FastAPI, the RQ worker, Postgres with
 pgvector, and Redis-compatible Key Value:
 
 ```text
 Browser -> Vercel Next.js -> Render FastAPI -> Render Postgres/pgvector
                                       |      -> Render Key Value
-                                      `-> RQ queue
+                                      `-> RQ enqueue
 Render worker -------------------------------^
 ```
 
-This repository does not include `render.yaml` or `vercel.json`. Configure the services in the
-Vercel and Render dashboards. No public deployment URL is claimed here until the release checks
-below pass.
+The checked-in `render.yaml` defines the API, worker, Postgres 17 database, and private
+Redis-compatible queue. Model traffic goes through provider-neutral OpenAI-compatible adapters;
+the provider base URLs are configured in Render rather than committed to the repository. The
+Vercel project remains configured in its dashboard because it deploys only `apps/web`. No public
+deployment URL is claimed until the release checks below pass.
 
 ### Render API and worker
 
-Provision Render Postgres and Key Value. Create a Python 3.12 web service and background worker
-from the same repository. Install Tesseract and its English language data on the worker host.
+Create a Render Blueprint from `render.yaml`. The API and worker share `apps/api/Dockerfile`,
+which supplies Python 3.12, locked Python dependencies, Tesseract, and its English language data.
+The API applies idempotent Alembic migrations before starting Uvicorn.
 
-Use this build command for both Python services:
+Use this local installation command for both Python services:
 
 ```bash
 python3 -m venv .venv && \
@@ -204,8 +207,7 @@ python3 -m venv .venv && \
 API start command:
 
 ```bash
-.venv/bin/python -m uvicorn extent_api.main:app \
-  --app-dir apps/api/src --host 0.0.0.0 --port "$PORT"
+.venv/bin/python -m extent_api.render_web
 ```
 
 Worker start command:
@@ -214,18 +216,18 @@ Worker start command:
 .venv/bin/python -m extent_api.worker
 ```
 
-Run migrations once for each release. API and worker startup do not change the schema.
+The API runs this idempotent migration before every service start:
 
 ```bash
 .venv/bin/alembic -c apps/api/alembic.ini upgrade head
 ```
 
-Set these environment values on the API and worker where applicable:
+Set these environment values on both services where applicable:
 
 | Variable                           | Production value                                                           |
 | ---------------------------------- | -------------------------------------------------------------------------- |
 | `EXTENT_ENVIRONMENT`               | `production`                                                               |
-| `EXTENT_DATABASE_URL`              | Render internal URL using `postgresql+psycopg://`                          |
+| `EXTENT_DATABASE_URL`              | Render internal URL, normalized explicitly to the psycopg 3 driver         |
 | `EXTENT_DATABASE_MIGRATION_URL`    | Optional direct Postgres URL for Alembic                                   |
 | `EXTENT_REDIS_URL`                 | Render Key Value internal URL                                              |
 | `EXTENT_QUEUE_NAME`                | The same queue name on the API and worker                                  |
@@ -233,8 +235,8 @@ Set these environment values on the API and worker where applicable:
 | `EXTENT_ALLOWED_ORIGINS`           | Exact Vercel HTTPS origin                                                  |
 | `EXTENT_PUBLIC_WEB_ORIGIN`         | Exact Vercel HTTPS origin                                                  |
 | Google OAuth settings              | Client ID, client secret, and the same encryption keyring on both services |
-| Answer-provider settings           | API key, HTTPS base URL, model name, and timeout                           |
-| Embedding settings                 | API key, HTTPS base URL, and a model configured for 1,536 dimensions       |
+| Answer-provider settings           | API key, OpenAI-compatible base URL, model name, and timeout               |
+| Embedding settings                 | API key, OpenAI-compatible base URL, and a 1,536-dimension-capable model   |
 | `EXTENT_QUERY_REQUESTS_PER_MINUTE` | `12` unless intentionally changed                                          |
 | `EXTENT_OCR_EXECUTABLE`            | Tesseract path or executable name on the worker                            |
 

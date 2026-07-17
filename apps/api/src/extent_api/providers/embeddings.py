@@ -20,8 +20,16 @@ _MAX_BATCH_SIZE = 32
 _MAX_INPUT_CHARACTERS = 50_000
 _MAX_RESPONSE_BYTES = 2_000_000
 _RETRY_DELAYS_SECONDS = (0.25, 1.0)
+_EMBEDDINGS_PATH = "/embeddings"
 
 Embedding = tuple[float, ...]
+
+
+def _embeddings_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith(_EMBEDDINGS_PATH):
+        return normalized
+    return f"{normalized}{_EMBEDDINGS_PATH}"
 
 
 class EmbeddingGenerationError(RuntimeError):
@@ -59,7 +67,7 @@ class UrlLibEmbeddingTransport:
         timeout_seconds: int,
     ) -> bytes:
         request = Request(
-            f"{base_url.rstrip('/')}/embeddings",
+            _embeddings_url(base_url),
             data=json.dumps(
                 {"dimensions": dimensions, "input": list(inputs), "model": model}
             ).encode(),
