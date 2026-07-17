@@ -10,6 +10,7 @@ from extent_api.providers.chat_completion import (
     ModelConversationTurn,
     ModelGenerationError,
     ModelPassage,
+    ModelQueryInterpretation,
 )
 from extent_api.services.demo_corpus import DEMO_NAMESPACE
 from extent_api.services.publication import (
@@ -57,6 +58,18 @@ class ResilientDemoAnswerProvider:
 
     def __init__(self, delegate: _AnswerProvider | None = None) -> None:
         self._delegate = delegate
+
+    def interpret(self, *, question: str) -> ModelQueryInterpretation | None:
+        if self._delegate is None:
+            return None
+        interpret = getattr(self._delegate, "interpret", None)
+        if not callable(interpret):
+            return None
+        try:
+            result = interpret(question=question)
+        except ModelGenerationError:
+            return None
+        return result if isinstance(result, ModelQueryInterpretation) else None
 
     def generate(
         self,

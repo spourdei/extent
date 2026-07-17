@@ -44,7 +44,9 @@ _ORDER = re.compile(
 )
 _FILTER = re.compile(
     r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
-    r"missing|not\s+equal|over|under|where|with(?:out)?)\b|(?:<=|>=|!=|<>|<|>)",
+    r"missing|not\s+equal|where|with(?:out)?)\b|"
+    r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
+    r"(?:<=|>=|!=|<>|<|>)",
     re.I,
 )
 _EXCEPTIONS = re.compile(

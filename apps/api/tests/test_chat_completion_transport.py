@@ -7,7 +7,10 @@ from urllib.request import Request
 import pytest
 
 from extent_api.providers import chat_completion
-from extent_api.providers.chat_completion import UrlLibChatCompletionTransport
+from extent_api.providers.chat_completion import (
+    ChatCompletionAnswerProvider,
+    UrlLibChatCompletionTransport,
+)
 
 
 class _Response:
@@ -28,6 +31,25 @@ class _Response:
     def read(self, size: int) -> bytes:
         assert size == 1_000_001
         return self._body
+
+
+class _StaticTransport:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.messages: list[dict[str, str]] = []
+
+    def complete(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        messages: list[dict[str, str]],
+        model: str,
+        timeout_seconds: int,
+    ) -> str:
+        del api_key, base_url, model, timeout_seconds
+        self.messages = messages
+        return self.content
 
 
 @pytest.mark.parametrize(
@@ -75,3 +97,32 @@ def test_chat_transport_uses_portable_chat_completions_contract(
     assert json.loads(request.data) == {"messages": messages, "model": "model-name"}
     assert captured["timeout"] == 45
     assert content == "result"
+
+
+def test_chat_provider_returns_strict_query_interpretation() -> None:
+    transport = _StaticTransport(
+        json.dumps(
+            {
+                "canonical_question": ("What is the sum of Recovery across Claim_ID records?"),
+                "intents": ["aggregate"],
+                "mode": "structured",
+                "needs_clarification": None,
+            }
+        )
+    )
+    provider = ChatCompletionAnswerProvider(
+        api_key="secret",
+        base_url="https://models.example.com/v1",
+        model="model-name",
+        timeout_seconds=30,
+        transport=transport,
+    )
+
+    interpretation = provider.interpret(question="Add up Recovery over Claim_ID entries.")
+
+    assert interpretation.mode == "structured"
+    assert interpretation.intents == ["aggregate"]
+    assert interpretation.canonical_question.endswith("Claim_ID records?")
+    assert json.loads(transport.messages[1]["content"]) == {
+        "question": "Add up Recovery over Claim_ID entries."
+    }

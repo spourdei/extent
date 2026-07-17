@@ -121,8 +121,28 @@ class ClaimDraft(PublicationModel):
 
 
 class AnswerDraft(PublicationModel):
+    canonical_question: Annotated[str, Field(min_length=1, max_length=2_000)] | None = None
     claims: Annotated[list[ClaimDraft], Field(max_length=3)]
     needs_clarification: Annotated[str, Field(min_length=1, max_length=400)] | None = None
+    routing_intents: Annotated[
+        list[
+            Literal[
+                "aggregate",
+                "compare",
+                "completeness",
+                "exceptions",
+                "filter",
+                "group",
+                "join",
+                "list",
+                "lookup",
+                "order",
+                "summary",
+            ]
+        ],
+        Field(max_length=8),
+    ] = []
+    routing_mode: Literal["direct", "exhaustive", "mixed", "structured"] | None = None
     summary: Annotated[str, Field(min_length=1, max_length=2_000)]
 
     @model_validator(mode="after")

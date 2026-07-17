@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID, uuid5
 
 from extent_api.database.identity_repository import ActiveSessionRecord
@@ -22,6 +23,7 @@ from extent_api.providers.chat_completion import (
     ModelConversationTurn,
     ModelGenerationError,
     ModelPassage,
+    ModelQueryInterpretation,
 )
 from extent_api.providers.embeddings import (
     Embedding,
@@ -59,7 +61,12 @@ from extent_api.services.publication import (
     authorize_answer_draft,
     coverage_gaps,
 )
-from extent_api.services.query_planning import QueryPlan, plan_query
+from extent_api.services.query_planning import (
+    QueryIntent,
+    QueryMode,
+    QueryPlan,
+    plan_query,
+)
 from extent_api.services.structured_analysis import (
     STRUCTURED_ANALYSIS_POLICY_VERSION,
     StructuredAnalysisResult,
@@ -369,7 +376,39 @@ class QueryService:
         now = self._clock()
         self._rate_limiter.consume(user_id=active_session.account.user_id, now=now)
         normalized_question = question.strip()
-        if _SOURCE_STATE_QUESTION.search(normalized_question):
+        execution_question = normalized_question
+        deterministic_plan = plan_query(normalized_question)
+        deterministic_exhaustive_request = parse_exhaustive_request(normalized_question)
+        source_state_question = _SOURCE_STATE_QUESTION.search(normalized_question) is not None
+        interpretation: ModelQueryInterpretation | None = None
+        if (
+            source_state_question
+            or deterministic_plan.requires_complete_data
+            or isinstance(
+                deterministic_exhaustive_request,
+                (ExhaustiveRequest, ExhaustiveRequestNeedsClarification),
+            )
+        ):
+            interpretation = _interpret_for_routing(
+                self._answer_provider,
+                question=normalized_question,
+            )
+            if interpretation is not None and _safe_canonical_question(
+                normalized_question,
+                interpretation.canonical_question,
+            ):
+                execution_question = " ".join(interpretation.canonical_question.strip().split())
+
+        query_plan = _merge_query_plans(
+            deterministic_plan,
+            _merge_query_plans(
+                plan_query(execution_question),
+                _model_query_plan(interpretation) if interpretation is not None else None,
+            ),
+        )
+        exhaustive_request = parse_exhaustive_request(execution_question)
+
+        if source_state_question or _SOURCE_STATE_QUESTION.search(execution_question):
             stored = self._repository.store_publication_result(
                 claims=(),
                 context=context,
@@ -382,8 +421,6 @@ class QueryService:
                 status="insufficient",
             )
             return project_question_result(stored)
-        query_plan = plan_query(normalized_question)
-        exhaustive_request = parse_exhaustive_request(normalized_question)
         if isinstance(
             exhaustive_request, ExhaustiveRequestNeedsClarification
         ) and query_plan.mode not in {"mixed", "structured"}:
@@ -399,52 +436,17 @@ class QueryService:
                 status="insufficient",
             )
             return project_question_result(stored)
-        if query_plan.requires_complete_data:
-            ready_blocks = self._repository.list_ready_blocks(context=context)
-            analysis = analyze_structured_question(
-                ready_blocks,
-                idempotency_key=idempotency_key,
-                plan=query_plan,
-                question=normalized_question,
-                run_id=context.run_id,
-            )
-            # Once the structured executor found relevant tables, its capability
-            # verdict is authoritative.  In particular, ``unsupported`` means a
-            # requested clause could not be compiled or executed; falling through
-            # to sampled retrieval/model generation would risk publishing a
-            # plausible but partial answer.  ``not_applicable`` remains the only
-            # status eligible for the narrow scalar-narrative fallback below.
-            if analysis.status in {"complete", "incomplete", "unsupported"} and (
-                query_plan.mode != "mixed" or "join" in query_plan.intents
-            ):
-                return self._store_structured_analysis(
-                    analysis,
-                    context=context,
-                    idempotency_key=idempotency_key,
-                    now=now,
-                    plan=query_plan,
-                    question=normalized_question,
-                )
-            if isinstance(exhaustive_request, ExhaustiveRequest):
-                return self._extract_values(
-                    blocks=ready_blocks,
-                    context=context,
-                    idempotency_key=idempotency_key,
-                    now=now,
-                    question=normalized_question,
-                    request=exhaustive_request,
-                )
-            if (
-                query_plan.mode == "structured" or "join" in query_plan.intents
-            ) and not _can_fallback_from_structured(normalized_question, plan=query_plan):
-                return self._store_structured_analysis(
-                    analysis,
-                    context=context,
-                    idempotency_key=idempotency_key,
-                    now=now,
-                    plan=query_plan,
-                    question=normalized_question,
-                )
+        complete_result = self._execute_complete_route(
+            context=context,
+            display_question=normalized_question,
+            execution_question=execution_question,
+            exhaustive_request=exhaustive_request,
+            idempotency_key=idempotency_key,
+            now=now,
+            plan=query_plan,
+        )
+        if complete_result is not None:
+            return complete_result
         if isinstance(exhaustive_request, ExhaustiveRequestNeedsClarification):
             stored = self._repository.store_publication_result(
                 claims=(),
@@ -458,14 +460,6 @@ class QueryService:
                 status="insufficient",
             )
             return project_question_result(stored)
-        if isinstance(exhaustive_request, ExhaustiveRequest):
-            return self._extract_values(
-                context=context,
-                idempotency_key=idempotency_key,
-                now=now,
-                question=normalized_question,
-                request=exhaustive_request,
-            )
         is_follow_up = _needs_bounded_context(normalized_question)
         history = (
             self._repository.list_results(
@@ -564,40 +558,6 @@ class QueryService:
             require_token_match=embedding is None,
             tokens=tokens,
         )
-        if query_plan.mode == "direct" and any(
-            candidate.pipeline_version
-            in {
-                "csv-record-v1",
-                "csv-record-v2",
-                "docx-body-v1",
-                "docx-body-v2",
-                "xlsx-sheet-v1",
-            }
-            for candidate in candidates
-        ):
-            analysis = analyze_structured_question(
-                self._repository.list_ready_blocks(context=context),
-                idempotency_key=idempotency_key,
-                plan=query_plan,
-                question=normalized_question,
-                run_id=context.run_id,
-            )
-            if (
-                analysis.applicable
-                and analysis.claims
-                and (
-                    analysis.examined_rows == 1
-                    or analysis.matched_rows < analysis.examined_rows
-                )
-            ):
-                return self._store_structured_analysis(
-                    analysis,
-                    context=context,
-                    idempotency_key=idempotency_key,
-                    now=now,
-                    plan=query_plan,
-                    question=normalized_question,
-                )
         if not passages:
             stored = self._repository.store_retrieval_result(
                 context=context,
@@ -688,6 +648,47 @@ class QueryService:
                         question=normalized_question,
                     )
                     return project_question_result(stored)
+
+        draft_interpretation = _draft_query_interpretation(draft)
+        if draft_interpretation is not None and _safe_canonical_question(
+            normalized_question,
+            draft_interpretation.canonical_question,
+        ):
+            model_execution_question = " ".join(
+                draft_interpretation.canonical_question.strip().split()
+            )
+            canonical_plan = plan_query(model_execution_question)
+            model_plan = _merge_query_plans(
+                query_plan if query_plan.requires_complete_data else canonical_plan,
+                _merge_query_plans(canonical_plan, _model_query_plan(draft_interpretation)),
+            )
+            model_exhaustive_request = parse_exhaustive_request(model_execution_question)
+            if isinstance(
+                model_exhaustive_request, ExhaustiveRequestNeedsClarification
+            ) and model_plan.mode not in {"mixed", "structured"}:
+                stored = self._repository.store_publication_result(
+                    claims=(),
+                    context=context,
+                    idempotency_key=idempotency_key,
+                    message=model_exhaustive_request.message,
+                    now=now,
+                    passages=passages,
+                    policy_version=CLARIFICATION_POLICY_VERSION,
+                    question=normalized_question,
+                    status="insufficient",
+                )
+                return project_question_result(stored)
+            routed_result = self._execute_complete_route(
+                context=context,
+                display_question=normalized_question,
+                execution_question=model_execution_question,
+                exhaustive_request=model_exhaustive_request,
+                idempotency_key=idempotency_key,
+                now=now,
+                plan=model_plan,
+            )
+            if routed_result is not None:
+                return routed_result
 
         if (
             not draft.claims
@@ -916,6 +917,72 @@ class QueryService:
             status=publication.status,
         )
         return project_question_result(stored)
+
+    def _execute_complete_route(
+        self,
+        *,
+        context: QueryContext,
+        display_question: str,
+        execution_question: str,
+        exhaustive_request: ExhaustiveRequest | ExhaustiveRequestNeedsClarification | None,
+        idempotency_key: str,
+        now: datetime,
+        plan: QueryPlan,
+    ) -> WorkspaceQuestionResultView | None:
+        ready_blocks: list[RetrievedBlock] | None = None
+        if plan.requires_complete_data:
+            ready_blocks = self._repository.list_ready_blocks(context=context)
+            analysis = analyze_structured_question(
+                ready_blocks,
+                idempotency_key=idempotency_key,
+                plan=plan,
+                question=execution_question,
+                run_id=context.run_id,
+            )
+            # Complete-data execution remains authoritative after the model has
+            # interpreted the question. Sampled retrieval cannot safely replace
+            # a failed aggregate, exhaustive, grouped, or joined operation.
+            if analysis.status in {"complete", "incomplete", "unsupported"} and (
+                plan.mode != "mixed" or "join" in plan.intents
+            ):
+                return self._store_structured_analysis(
+                    analysis,
+                    context=context,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                    plan=plan,
+                    question=display_question,
+                )
+            if isinstance(exhaustive_request, ExhaustiveRequest):
+                return self._extract_values(
+                    blocks=ready_blocks,
+                    context=context,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                    question=display_question,
+                    request=exhaustive_request,
+                )
+            if (plan.mode == "structured" or "join" in plan.intents) and not (
+                _can_fallback_from_structured(execution_question, plan=plan)
+            ):
+                return self._store_structured_analysis(
+                    analysis,
+                    context=context,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                    plan=plan,
+                    question=display_question,
+                )
+        if isinstance(exhaustive_request, ExhaustiveRequest):
+            return self._extract_values(
+                blocks=ready_blocks,
+                context=context,
+                idempotency_key=idempotency_key,
+                now=now,
+                question=display_question,
+                request=exhaustive_request,
+            )
+        return None
 
     def _extract_values(
         self,
@@ -1550,6 +1617,134 @@ def _explicit_comparable_values(text: str) -> list[tuple[str, str, str]]:
             continue
         filtered.append(item)
     return [(kind, raw, canonical) for _, _, kind, raw, canonical in filtered]
+
+
+def _interpret_for_routing(
+    provider: AnswerProvider | None,
+    *,
+    question: str,
+) -> ModelQueryInterpretation | None:
+    """Give every deterministic route one bounded model interpretation call.
+
+    Older test or local providers may only implement ``generate``. Calling that
+    method as a compatibility probe preserves the one-model-call invariant while
+    leaving the deterministic plan unchanged.
+    """
+
+    if provider is None:
+        return None
+    interpret = getattr(provider, "interpret", None)
+    if callable(interpret):
+        try:
+            result = interpret(question=question)
+        except ModelGenerationError:
+            return None
+        return result if isinstance(result, ModelQueryInterpretation) else None
+    with suppress(ModelGenerationError):
+        provider.generate(
+            history=[],
+            passages=[],
+            question=(
+                "Interpret this question for complete-data routing. Do not answer it: "
+                f"{question}"
+            ),
+        )
+    return None
+
+
+def _safe_canonical_question(original: str, canonical: str) -> bool:
+    normalized = " ".join(canonical.strip().split())
+    if not normalized:
+        return False
+    original_literals = _routing_literals(original)
+    canonical_folded = normalized.casefold()
+    return all(literal.casefold() in canonical_folded for literal in original_literals)
+
+
+def _routing_literals(question: str) -> tuple[str, ...]:
+    quoted = [
+        match.group(1) or match.group(2)
+        for match in re.finditer(r'"([^"]+)"|“([^”]+)”', question)
+    ]
+    material = [
+        match.group(0)
+        for pattern in (
+            _CURRENCY_AMOUNT,
+            _SUFFIXED_CURRENCY_AMOUNT,
+            _PERCENT_VALUE,
+            _ISO_DATE_VALUE,
+            _MONTH_DATE_VALUE,
+            _IDENTIFIER_VALUE,
+            _FORMATTED_NUMBER,
+            _PLAIN_NUMBER,
+        )
+        for match in pattern.finditer(question)
+    ]
+    return tuple(dict.fromkeys((*quoted, *material)))
+
+
+def _model_query_plan(
+    interpretation: ModelQueryInterpretation | None,
+) -> QueryPlan | None:
+    if interpretation is None:
+        return None
+    intents = tuple(sorted({cast(QueryIntent, intent) for intent in interpretation.intents}))
+    complete_intents = {"aggregate", "completeness", "group", "join", "list", "order"}
+    requires_complete_data = bool(set(intents) & complete_intents) or (
+        interpretation.mode in {"exhaustive", "structured"}
+    )
+    return QueryPlan(
+        intents=intents,
+        mode=cast(QueryMode, interpretation.mode),
+        requires_complete_data=requires_complete_data,
+    )
+
+
+def _draft_query_interpretation(draft: AnswerDraft) -> ModelQueryInterpretation | None:
+    if draft.canonical_question is None or draft.routing_mode is None:
+        return None
+    intents = draft.routing_intents or ["lookup"]
+    return ModelQueryInterpretation(
+        canonical_question=draft.canonical_question,
+        intents=intents,
+        mode=draft.routing_mode,
+        needs_clarification=draft.needs_clarification,
+    )
+
+
+def _merge_query_plans(left: QueryPlan, right: QueryPlan | None) -> QueryPlan:
+    if right is None:
+        return left
+    intents = tuple(sorted(set(left.intents) | set(right.intents)))
+    requires_complete_data = left.requires_complete_data or right.requires_complete_data
+    intent_set = set(intents)
+    if intent_set & {"compare", "join"}:
+        mode: QueryMode = "mixed"
+    elif requires_complete_data:
+        mode = (
+            "exhaustive"
+            if "list" in intent_set
+            and not intent_set
+            & {
+                "aggregate",
+                "completeness",
+                "exceptions",
+                "filter",
+                "group",
+                "order",
+                "summary",
+            }
+            else "structured"
+        )
+    elif right.mode != "direct":
+        mode = right.mode
+    else:
+        mode = left.mode
+    return QueryPlan(
+        intents=cast(tuple[QueryIntent, ...], intents),
+        mode=mode,
+        requires_complete_data=requires_complete_data,
+    )
 
 
 def _can_fallback_from_structured(question: str, *, plan: QueryPlan) -> bool:

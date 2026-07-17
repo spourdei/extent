@@ -53,6 +53,33 @@ class ModelGenerationError(RuntimeError):
         self.code = code
 
 
+QueryIntentName = Literal[
+    "aggregate",
+    "compare",
+    "completeness",
+    "exceptions",
+    "filter",
+    "group",
+    "join",
+    "list",
+    "lookup",
+    "order",
+    "summary",
+]
+QueryModeName = Literal["direct", "exhaustive", "mixed", "structured"]
+
+
+class ModelQueryInterpretation(BaseModel):
+    """Strict model output used only to interpret and route a user question."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    canonical_question: Annotated[str, Field(min_length=1, max_length=2_000)]
+    intents: Annotated[list[QueryIntentName], Field(min_length=1, max_length=8)]
+    mode: QueryModeName
+    needs_clarification: Annotated[str, Field(min_length=1, max_length=400)] | None = None
+
+
 class ChatCompletionTransport(Protocol):
     def complete(
         self,
@@ -140,7 +167,10 @@ class _GeneratedClaim(_GeneratedModel):
 
 
 class _GeneratedAnswer(_GeneratedModel):
+    canonical_question: Annotated[str, Field(min_length=1, max_length=2_000)]
     claims: Annotated[list[_GeneratedClaim], Field(max_length=3)]
+    intents: Annotated[list[QueryIntentName], Field(min_length=1, max_length=8)]
+    mode: QueryModeName
     needs_clarification: Annotated[str, Field(min_length=1, max_length=400)] | None = None
     summary: Annotated[str, Field(min_length=1, max_length=2_000)]
 
@@ -160,6 +190,27 @@ class ChatCompletionAnswerProvider:
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._transport = transport or UrlLibChatCompletionTransport()
+
+    def interpret(self, *, question: str) -> ModelQueryInterpretation:
+        content = self._transport.complete(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            messages=[
+                {"role": "system", "content": _INTERPRETATION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps({"question": question}, ensure_ascii=False),
+                },
+            ],
+            model=self._model,
+            timeout_seconds=self._timeout_seconds,
+        )
+        fenced = _JSON_FENCE.fullmatch(content.strip())
+        raw_json = fenced.group(1) if fenced is not None else content
+        try:
+            return ModelQueryInterpretation.model_validate_json(raw_json)
+        except ValidationError as error:
+            raise ModelGenerationError("invalid_response") from error
 
     def generate(
         self,
@@ -199,6 +250,7 @@ class ChatCompletionAnswerProvider:
         if generated.needs_clarification is not None and generated.claims:
             raise ModelGenerationError("invalid_response")
         return AnswerDraft(
+            canonical_question=generated.canonical_question,
             claims=[
                 ClaimDraft(
                     claim_id=uuid4(),
@@ -214,6 +266,8 @@ class ChatCompletionAnswerProvider:
                 for claim in generated.claims
             ],
             needs_clarification=generated.needs_clarification,
+            routing_intents=generated.intents,
+            routing_mode=generated.mode,
             summary=generated.summary,
         )
 
@@ -222,6 +276,9 @@ _SYSTEM_PROMPT = """You draft evidence-bounded answers for a deterministic verif
 Return exactly one JSON object and no Markdown. Use this schema:
 {
   "summary": "short answer or abstention",
+  "canonical_question": "clear standalone version of the user's exact request",
+  "intents": ["lookup"],
+  "mode": "direct|exhaustive|mixed|structured",
   "needs_clarification": null,
   "claims": [{
     "relation": "fact|change|conflict|unclear",
@@ -244,6 +301,13 @@ only to resolve the current question's referent; it is not evidence and cannot s
 If a follow-up referent is not unambiguous from that history, return no claims and put one short
 clarifying question in needs_clarification. Otherwise needs_clarification must be null. Cite
 only the supplied evidence for every claim.
+Always classify the request as well as answering it. Preserve every proper noun, field name,
+identifier, number, date, currency, version, comparison scope, and filter value in
+canonical_question. Use structured mode for calculations, filters over sets, grouping,
+sorting, completeness, and exception analysis; exhaustive for complete lists; mixed for
+comparisons or joins; direct only for bounded lookups and narrative questions. If the mode is
+structured or exhaustive, return no claims: the server will execute the canonical question
+over the complete dataset instead of trusting sampled evidence.
 Answer only what the question asks and order claims from most direct to least direct. For a
 singular fact question with a stated scope, return one claim containing the direct final or
 overall value. Do not add components, subtotals, or related values unless the question asks for
@@ -257,4 +321,23 @@ that disagreement: return one atomic conflict claim for each disputed field the 
 about, with both evidence branches and all comparison fields populated. The deterministic
 verifier will decide whether one source has sufficient authority. If the evidence cannot answer
 the question, return an empty claims list.
+"""
+
+
+_INTERPRETATION_SYSTEM_PROMPT = """You are the query interpreter for an evidence system.
+Return exactly one JSON object and no Markdown using this schema:
+{
+  "canonical_question": "clear standalone version of the user's exact request",
+  "intents": ["aggregate", "filter"],
+  "mode": "direct|exhaustive|mixed|structured",
+  "needs_clarification": null
+}
+Interpret the user's meaning rather than relying on trigger words. Preserve every proper noun,
+document/version name, field name, quoted phrase, identifier, number, date, currency amount,
+comparison scope, and filter value exactly. You may improve grammar and make an implicit
+operation explicit, but never add, remove, or change a requested constraint. Use structured
+for calculations, filters over sets, grouping, sorting, completeness checks, and exception
+analysis; exhaustive for complete lists; mixed for comparisons or joins; direct for a bounded
+lookup or narrative question. If the request truly lacks a required subject or scope, set one
+short question in needs_clarification; otherwise it must be null.
 """

@@ -184,6 +184,28 @@ class _ExplanationAnswerProvider:
         )
 
 
+class _EscalatingAnswerProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(
+        self,
+        *,
+        history: list[ModelConversationTurn],
+        passages: list[ModelPassage],
+        question: str,
+    ) -> AnswerDraft:
+        del history, passages, question
+        self.calls += 1
+        return AnswerDraft(
+            canonical_question="What is the sum of Recovery across Claim_ID records?",
+            claims=[],
+            routing_intents=["aggregate"],
+            routing_mode="structured",
+            summary="This request requires a complete-data calculation.",
+        )
+
+
 def test_exact_alder_peak_packet_is_prepared_with_xlsx_evidence() -> None:
     blocks = _demo_blocks()
 
@@ -417,6 +439,85 @@ def test_broad_mismatch_recovers_each_corroborated_field_after_model_abstention(
         and len({citation.source_name for citation in claim.citations}) == 2
         for claim in result.claims
     )
+
+
+def test_demo_aggregate_calls_model_router_and_preserves_exact_calculation() -> None:
+    provider = _EmptyAnswerProvider()
+    service = QueryService(
+        answer_provider=provider,
+        repository=PreparedDemoQueryStore(user_id=VISITOR_ID),
+        rate_limiter=_RateLimiter(),
+        clock=lambda: NOW,
+    )
+
+    result = service.ask(
+        active_session=demo_active_session(VISITOR_ID, now=NOW),
+        idempotency_key="model-routed-recovery-total",
+        question="What is the total Recovery for Claim_ID records?",
+        workspace_id=DEMO_WORKSPACE_ID,
+    )
+
+    assert provider.calls == 1
+    assert result.policy_version == "structured-analysis-policy-v1"
+    assert result.status == "evidence_supported"
+    assert [(claim.text, claim.value) for claim in result.claims] == [
+        ("Sum Recovery is 16600.", "16600")
+    ]
+    assert [citation.line_start_one_based for citation in result.claims[0].citations] == [
+        2,
+        10,
+    ]
+
+
+def test_demo_complete_list_calls_model_router_without_three_claim_truncation() -> None:
+    provider = _EmptyAnswerProvider()
+    service = QueryService(
+        answer_provider=provider,
+        repository=PreparedDemoQueryStore(user_id=VISITOR_ID),
+        rate_limiter=_RateLimiter(),
+        clock=lambda: NOW,
+    )
+
+    result = service.ask(
+        active_session=demo_active_session(VISITOR_ID, now=NOW),
+        idempotency_key="model-routed-claim-list",
+        question="List every Claim_ID",
+        workspace_id=DEMO_WORKSPACE_ID,
+    )
+
+    assert provider.calls == 1
+    assert [claim.value for claim in result.claims] == [
+        "CLM-2301",
+        "CLM-2302",
+        "CLM-2303",
+        "CLM-2401",
+        "CLM-2402",
+        "CLM-2403",
+        "CLM-2501",
+        "CLM-2502",
+        "CLM-2503",
+    ]
+
+
+def test_model_can_escalate_unfamiliar_wording_into_complete_data_execution() -> None:
+    provider = _EscalatingAnswerProvider()
+    service = QueryService(
+        answer_provider=provider,
+        repository=PreparedDemoQueryStore(user_id=VISITOR_ID),
+        rate_limiter=_RateLimiter(),
+        clock=lambda: NOW,
+    )
+
+    result = service.ask(
+        active_session=demo_active_session(VISITOR_ID, now=NOW),
+        idempotency_key="model-escalated-recovery-total",
+        question="Add up Recovery over Claim_ID entries.",
+        workspace_id=DEMO_WORKSPACE_ID,
+    )
+
+    assert provider.calls == 1
+    assert result.policy_version == "structured-analysis-policy-v1"
+    assert result.claims[0].value == "16600"
 
 
 def test_xlsx_is_admitted_only_with_its_real_mime_and_extension() -> None:

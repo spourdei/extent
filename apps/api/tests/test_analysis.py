@@ -63,6 +63,15 @@ def test_planner_keeps_scalar_questions_direct_and_routes_set_wide_work() -> Non
     assert set(breakdown.intents) >= {"aggregate", "group"}
 
 
+def test_planner_does_not_treat_aggregate_scope_over_entries_as_a_filter() -> None:
+    scoped = plan_query("What is the sum of Recovery over all Claim_ID entries?")
+    numeric_filter = plan_query("List claims with Recovery over 1000")
+
+    assert "aggregate" in scoped.intents
+    assert "filter" not in scoped.intents
+    assert numeric_filter.intents == ("filter", "list")
+
+
 def test_planner_recognizes_coordinated_scopes_without_magic_compare_wording() -> None:
     stated_values = plan_query(
         "What service levels are stated for the proposal and the signed contract?"
@@ -121,6 +130,16 @@ def test_structured_aggregation_scans_all_rows_and_keeps_units() -> None:
     assert result.examined_rows == 3
     assert [claim.value for claim in result.claims] == ["15 USD", "7.5 USD"]
     assert len(result.audits) == 3
+
+
+def test_structured_aggregate_accepts_over_all_entries_scope() -> None:
+    result = _analyze(
+        "What is the sum of Recovery over all Claim_ID entries?",
+        [_block("Claim_ID\tRecovery\nCLM-1\t10\nCLM-2\t25")],
+    )
+
+    assert result.complete
+    assert result.claims[0].value == "35"
 
 
 def test_malformed_structured_row_prevents_a_complete_claim() -> None:

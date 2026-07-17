@@ -680,6 +680,17 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
         for mention_span in _condition_mentions(table, column, normalized):
             tail = normalized[mention_span[1] : mention_span[1] + 160]
             prefix = normalized[max(0, mention_span[0] - 60) : mention_span[0]]
+            if re.search(
+                r"\b(?:aggregate|average|avg|count|maximum|max|minimum|min|sum|total)\b",
+                normalized,
+            ) and re.match(
+                r"\s+over\s+(?:all\s+)?(?:the\s+)?"
+                r"(?:[a-z0-9_]+\s+){0,6}(?:entries|records|rows)\b",
+                tail,
+            ):
+                # "sum Recovery over all Claim_ID entries" describes the
+                # aggregate's input set; it is not a numeric Recovery filter.
+                continue
             if re.search(r"(?:missing|without|(?:do|does|did)\s+not\s+have|no)\s+$", prefix):
                 conditions.append(_Condition(column=column, operator="is_null"))
                 break
