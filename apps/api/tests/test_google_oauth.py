@@ -1,6 +1,7 @@
 """Token-response compatibility tests for the Google OAuth adapter."""
 
 from collections.abc import Sequence
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -51,6 +52,19 @@ def test_exchange_accepts_omitted_scope_as_unchanged_grant(
     )
 
     assert tokens.scopes == frozenset(GOOGLE_OAUTH_SCOPES)
+
+
+def test_authorization_requests_include_previously_granted_scopes() -> None:
+    provider = GoogleOAuthProvider(client_id="client-id", client_secret="client-secret")
+
+    authorization_url = provider.authorization_url(
+        state="oauth-state",
+        code_verifier="pkce-verifier",
+        redirect_uri="https://extent.example/api/backend/v1/auth/google/callback",
+    )
+
+    query = parse_qs(urlsplit(authorization_url).query)
+    assert query["include_granted_scopes"] == ["true"]
 
 
 def test_exchange_rejects_explicitly_empty_scope_grant(

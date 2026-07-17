@@ -31,6 +31,7 @@ from extent_api.services.auth import (
 
 router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 logger = logging.getLogger("uvicorn.error.extent.auth")
+_OAUTH_SCOPE_RETRY_COOKIE = "extent_oauth_scope_retry"
 
 
 def get_database_session(request: Request) -> Iterator[DatabaseSession]:
@@ -103,6 +104,7 @@ def start_google_authorization(
     response = RedirectResponse(
         started.authorization_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT
     )
+    _clear_oauth_scope_retry(response, settings)
     _protect_auth_response(response)
     return response
 
@@ -176,8 +178,53 @@ def complete_google_authorization(
     except InvalidOAuthState:
         return _connect_redirect(settings, "invalid_state", reference_id=_request_id(request))
     except (GoogleOAuthError, OAuthCompletionError) as error:
+        if (
+            error.reason == "required_scopes_missing"
+            and request.cookies.get(_OAUTH_SCOPE_RETRY_COOKIE) != "1"
+        ):
+            try:
+                restarted = service.start_google_authorization()
+            except GoogleOAuthError as restart_error:
+                _log_flow_failure(
+                    request,
+                    event="google_oauth_scope_retry_failed",
+                    error=restart_error,
+                )
+            except Exception as restart_error:
+                _log_unexpected_failure(
+                    request,
+                    event="google_oauth_scope_retry_failed",
+                    stage="attempt_persistence",
+                    error=restart_error,
+                )
+            else:
+                _log_safe_failure(
+                    request,
+                    event="google_oauth_scope_retry_started",
+                    stage=error.stage,
+                    reason=error.reason,
+                )
+                response = RedirectResponse(
+                    restarted.authorization_url,
+                    status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+                )
+                response.set_cookie(
+                    key=_OAUTH_SCOPE_RETRY_COOKIE,
+                    value="1",
+                    max_age=settings.oauth_attempt_ttl_seconds,
+                    path="/",
+                    secure=settings.session_cookie_secure,
+                    httponly=True,
+                    samesite="lax",
+                )
+                _protect_auth_response(response)
+                return response
         _log_flow_failure(request, event="google_oauth_callback_failed", error=error)
-        return _connect_redirect(settings, "oauth_failed", reference_id=_request_id(request))
+        response = _connect_redirect(
+            settings, "oauth_failed", reference_id=_request_id(request)
+        )
+        _clear_oauth_scope_retry(response, settings)
+        return response
     except Exception as error:
         _log_unexpected_failure(
             request,
@@ -197,6 +244,7 @@ def complete_google_authorization(
         httponly=True,
         samesite="lax",
     )
+    _clear_oauth_scope_retry(response, settings)
     return response
 
 
@@ -280,6 +328,16 @@ def _protect_auth_response(response: Response) -> None:
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Pragma"] = "no-cache"
     response.headers["Referrer-Policy"] = "no-referrer"
+
+
+def _clear_oauth_scope_retry(response: Response, settings: Settings) -> None:
+    response.delete_cookie(
+        key=_OAUTH_SCOPE_RETRY_COOKIE,
+        path="/",
+        secure=settings.session_cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
 
 
 def _request_id(request: Request) -> str:

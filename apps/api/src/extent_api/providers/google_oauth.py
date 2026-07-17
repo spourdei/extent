@@ -100,6 +100,7 @@ class GoogleOAuthProvider:
             )
             url, returned_state = flow.authorization_url(
                 access_type="offline",
+                include_granted_scopes="true",
                 prompt="consent",
             )
         except Exception as error:
