@@ -22,19 +22,25 @@ QueryIntent = Literal[
     "join",
     "list",
     "lookup",
+    "order",
     "summary",
 ]
 
 _WORD = re.compile(r"[^\W_]+|\d+", re.UNICODE)
 _LIST = re.compile(r"\b(?:all|each|every|complete\s+list|list|enumerate|show\s+all)\b", re.I)
 _AGGREGATE = re.compile(
-    r"\b(?:average|avg|count|how\s+many|maximum|max|minimum|min|sum)\b",
+    r"\b(?:average|avg|count|how\s+many|number\s+of|maximum|max|minimum|min|sum)\b",
     re.I,
 )
 _TOTAL = re.compile(r"\b(?:aggregate|total)\b", re.I)
 _SET_NOUN = re.compile(r"\b(?:dataset|file|record|row|source|table)s?\b", re.I)
-_GROUP = re.compile(r"\b(?:break\s*down|group(?:ed)?|per)\b|\bby\b", re.I)
+_GROUP = re.compile(r"\b(?:break\s*down|for\s+each|group(?:ed)?|per)\b|\bby\b", re.I)
 _BREAKDOWN = re.compile(r"\b(?:break\s*down|group(?:ed)?(?:\s+\w+){0,4}\s+by)\b", re.I)
+_ORDER = re.compile(
+    r"\b(?:in\s+)?(?:ascending|descending|chronological|reverse\s+chronological)\s+order\b|"
+    r"\b(?:order(?:ed)?|sort(?:ed)?)\s+by\b",
+    re.I,
+)
 _FILTER = re.compile(
     r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
     r"missing|not\s+equal|over|under|where|with(?:out)?)\b|(?:<=|>=|!=|<>|<|>)",
@@ -96,12 +102,14 @@ def plan_query(question: str) -> QueryPlan:
         )
     ):
         intents.add("aggregate")
-    if _BREAKDOWN.search(normalized):
+    # Do not mistake the ``by`` in an ordering clause for a grouping request.
+    grouping_text = _ORDER.sub("", normalized)
+    if _BREAKDOWN.search(grouping_text):
         # A breakdown is an implicit grouped count even when the user does not
         # spell out an aggregate verb (for example, "break down items by state").
         intents.add("aggregate")
         intents.add("group")
-    elif _GROUP.search(normalized) and "aggregate" in intents:
+    elif _GROUP.search(grouping_text) and "aggregate" in intents:
         intents.add("group")
     if _FILTER.search(normalized):
         intents.add("filter")
@@ -115,6 +123,8 @@ def plan_query(question: str) -> QueryPlan:
         intents.add("compare")
     if _SUMMARY.search(normalized):
         intents.add("summary")
+    if _ORDER.search(normalized):
+        intents.add("order")
     if not intents:
         intents.add("lookup")
 
@@ -125,6 +135,7 @@ def plan_query(question: str) -> QueryPlan:
         "group",
         "join",
         "list",
+        "order",
     }
     requires_complete_data = bool(intents & complete_intents)
     if "filter" in intents and (
@@ -152,6 +163,7 @@ def plan_query(question: str) -> QueryPlan:
         "exceptions",
         "filter",
         "group",
+        "order",
         "summary",
     }:
         mode = "structured"

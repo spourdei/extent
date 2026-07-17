@@ -13,6 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import cmp_to_key
 from pathlib import PurePosixPath
 from typing import Literal
 from uuid import UUID, uuid5
@@ -179,6 +180,33 @@ class _Condition:
     value: TypedValue | None = None
 
 
+AggregateOperation = Literal["average", "count", "maximum", "minimum", "sum"]
+SortDirection = Literal["asc", "desc"]
+
+
+@dataclass(frozen=True)
+class _Metric:
+    column: int | None
+    operation: AggregateOperation
+
+
+@dataclass(frozen=True)
+class _Order:
+    column: int
+    direction: SortDirection
+
+
+@dataclass(frozen=True)
+class _ValidatedExecutionPlan:
+    """Schema-bound operations that must all be executable before publication."""
+
+    conditions: tuple[_Condition, ...]
+    group_columns: tuple[int, ...] = ()
+    metrics: tuple[_Metric, ...] = ()
+    order_by: tuple[_Order, ...] = ()
+    output_columns: tuple[int, ...] = ()
+
+
 def analyze_structured_question(
     blocks: list[RetrievedBlock],
     *,
@@ -229,10 +257,11 @@ def analyze_structured_question(
             question=question,
             run_id=run_id,
         )
-    if "aggregate" in plan.intents:
+    if "aggregate" in plan.intents or _aggregation_requested(question):
         return _aggregate(
             selected,
-            grouped="group" in plan.intents,
+            filter_required="filter" in plan.intents,
+            grouped="group" in plan.intents or _grouping_requested(question),
             idempotency_key=idempotency_key,
             question=question,
             run_id=run_id,
@@ -240,7 +269,9 @@ def analyze_structured_question(
     return _list_or_summarize(
         selected,
         exception_only="exceptions" in plan.intents,
+        filter_required="filter" in plan.intents,
         idempotency_key=idempotency_key,
+        order_required="order" in plan.intents or _ordering_requested(question),
         question=question,
         run_id=run_id,
     )
@@ -645,68 +676,117 @@ def _column_score(header: str, question: str) -> int:
 def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]:
     normalized = _normalized_text(_expand_symbolic_comparators(question))
     conditions: list[_Condition] = []
-    for column, header in enumerate(table.headers):
-        header_key = _normalized_text(header)
-        match = re.search(rf"\b{re.escape(header_key)}\b", normalized)
-        if match is None:
-            continue
-        tail = normalized[match.end() : match.end() + 120]
-        prefix = normalized[max(0, match.start() - 60) : match.start()]
-        if re.search(r"(?:missing|without|(?:do|does|did)\s+not\s+have|no)\s+$", prefix):
-            conditions.append(_Condition(column=column, operator="is_null"))
-            continue
-        if re.match(
-            r"\s+(?:is\s+)?(?:missing|null|blank|empty|not\s+(?:set|provided))\b", tail
-        ):
-            conditions.append(_Condition(column=column, operator="is_null"))
-            continue
-        if re.match(
-            r"\s+(?:is\s+)?(?:present|provided|not\s+(?:missing|null|blank|empty))\b", tail
-        ):
-            conditions.append(_Condition(column=column, operator="not_null"))
-            continue
-        tail = re.sub(
-            r"^\s+is\s+(?=(?:above|after|at\s+(?:least|most)|before|below|"
-            r"greater|less|more|over|under)\b)",
-            " ",
-            tail,
-        )
-        comparator = re.match(
-            r"\s*(?P<operator>>=|<=|!=|<>|=|>|<|is\s+not|not\s+equal\s+to|"
-            r"greater\s+than|more\s+than|over|above|at\s+least|less\s+than|"
-            r"under|below|at\s+most|before|after|equals?|is|are)\s+"
-            r"(?P<value>[^?,;]+?)(?=\s+(?:and|by|grouped|per|where|with)\b|$)",
-            tail,
-        )
-        if comparator is None:
-            continue
-        raw_value = comparator.group("value").strip(" '\"")
-        if not raw_value:
-            continue
-        referenced_columns = [
-            index
-            for index, candidate in enumerate(table.headers)
-            if index != column and _normalized_text(candidate) == _normalized_text(raw_value)
-        ]
-        conditions.append(
-            _Condition(
-                column=column,
-                operator=_operator(comparator.group("operator")),
-                other_column=(referenced_columns[0] if len(referenced_columns) == 1 else None),
-                value=(None if len(referenced_columns) == 1 else parse_typed_value(raw_value)),
+    for column, _header in enumerate(table.headers):
+        for mention_span in _condition_mentions(table, column, normalized):
+            tail = normalized[mention_span[1] : mention_span[1] + 160]
+            prefix = normalized[max(0, mention_span[0] - 60) : mention_span[0]]
+            if re.search(r"(?:missing|without|(?:do|does|did)\s+not\s+have|no)\s+$", prefix):
+                conditions.append(_Condition(column=column, operator="is_null"))
+                break
+            if re.match(
+                r"\s+(?:is\s+)?(?:missing|null|blank|empty|not\s+(?:set|provided))\b",
+                tail,
+            ):
+                conditions.append(_Condition(column=column, operator="is_null"))
+                break
+            if re.match(
+                r"\s+(?:is\s+)?(?:present|provided|not\s+(?:missing|null|blank|empty))\b",
+                tail,
+            ):
+                conditions.append(_Condition(column=column, operator="not_null"))
+                break
+            tail = re.sub(
+                r"^\s+(?:is|are)\s+(?=(?:above|after|at\s+(?:least|most)|before|below|"
+                r"greater|less|more|no\s+(?:earlier|later)|on\s+or|over|under)\b)",
+                " ",
+                tail,
             )
-        )
+            comparator = re.match(
+                r"\s*(?P<operator>>=|<=|!=|<>|=|>|<|on\s+or\s+after|"
+                r"on\s+or\s+before|no\s+earlier\s+than|no\s+later\s+than|"
+                r"is\s+not|not\s+equal\s+to|greater\s+than|more\s+than|over|"
+                r"above|at\s+least|less\s+than|under|below|at\s+most|before|"
+                r"after|equals?|is|are)\s+"
+                r"(?P<value>[^?,;]+?)(?=\s+(?:and|by|grouped|per|where|with|"
+                r"ordered|sorted|order|sort|ascending|descending)\b|$)",
+                tail,
+            )
+            if comparator is None:
+                implicit = (
+                    re.match(
+                        r"\s+(?P<value>[^?,;]+?)(?=\s+(?:and|by|grouped|per|"
+                        r"where|with|ordered|sorted|order|sort)\b|$)",
+                        tail,
+                    )
+                    if (
+                        re.search(r"\b(?:where|with)\s+$", prefix)
+                        or (conditions and re.search(r"\band\s+$", prefix))
+                    )
+                    else None
+                )
+                if implicit is not None:
+                    raw_value = implicit.group("value").strip(" '\"")
+                    if raw_value:
+                        conditions.append(
+                            _Condition(
+                                column=column,
+                                operator="eq",
+                                value=parse_typed_value(raw_value),
+                            )
+                        )
+                        break
+                continue
+            raw_value = comparator.group("value").strip(" '\"")
+            if not raw_value:
+                continue
+            referenced_columns = [
+                index
+                for index, candidate in enumerate(table.headers)
+                if index != column
+                and _normalized_text(candidate) == _normalized_text(raw_value)
+            ]
+            conditions.append(
+                _Condition(
+                    column=column,
+                    operator=_operator(comparator.group("operator")),
+                    other_column=(
+                        referenced_columns[0] if len(referenced_columns) == 1 else None
+                    ),
+                    value=(
+                        None if len(referenced_columns) == 1 else parse_typed_value(raw_value)
+                    ),
+                )
+            )
+            chained = re.match(
+                rf"\s+and\s+(?:{re.escape(_normalized_text(_header))}\s+)?"
+                r"(?:(?:is|are)\s+)?"
+                r"(?P<operator>on\s+or\s+after|on\s+or\s+before|"
+                r"no\s+earlier\s+than|no\s+later\s+than|at\s+least|at\s+most|"
+                r"greater\s+than|more\s+than|less\s+than|after|before|over|"
+                r"under|above|below)\s+(?P<value>[^?,;]+?)"
+                r"(?=\s+(?:and|by|where|with|ordered|sorted|order|sort)\b|$)",
+                tail[comparator.end() :],
+            )
+            if chained is not None:
+                chained_value = chained.group("value").strip(" '\"")
+                conditions.append(
+                    _Condition(
+                        column=column,
+                        operator=_operator(chained.group("operator")),
+                        value=parse_typed_value(chained_value),
+                    )
+                )
+            break
     if conditions:
         return tuple(conditions)
 
     # Entity values often scope summaries without a "where" clause.  Matching
     # exact cell values is schema-neutral and does not assume an ID column name.
-    header_spans = [
-        match.span()
-        for header in table.headers
-        if (match := re.search(rf"\b{re.escape(_normalized_text(header))}\b", normalized))
-        is not None
-    ]
+    header_spans: list[tuple[int, int]] = []
+    for header in table.headers:
+        header_match = re.search(rf"\b{re.escape(_normalized_text(header))}\b", normalized)
+        if header_match is not None:
+            header_spans.append(header_match.span())
     matches: list[_Condition] = []
     for column in range(len(table.headers)):
         distinct = {
@@ -725,6 +805,41 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
             ):
                 matches.append(_Condition(column=column, operator="eq", value=typed))
     return tuple(matches[:1])
+
+
+def _condition_mentions(
+    table: StructuredTable, column: int, question: str
+) -> list[tuple[int, int]]:
+    """Return unambiguous mentions, including ``due`` for a typed ``Due Date``."""
+
+    header_key = _normalized_text(table.headers[column])
+    aliases = [header_key]
+    header_tokens = header_key.split()
+    values = [
+        row.values[column]
+        for row in table.rows
+        if column < len(row.values) and not row.values[column].is_null
+    ]
+    if (
+        len(header_tokens) > 1
+        and header_tokens[-1] == "date"
+        and values
+        and all(value.kind == "date" for value in values)
+    ):
+        short = " ".join(header_tokens[:-1])
+        competing = [
+            candidate
+            for index, candidate in enumerate(table.headers)
+            if index != column and _normalized_text(candidate).startswith(short)
+        ]
+        if short and not competing:
+            aliases.append(short)
+    spans = {
+        match.span()
+        for alias in aliases
+        for match in re.finditer(rf"\b{re.escape(alias)}\b", question)
+    }
+    return sorted(spans, key=lambda span: (span[0], -(span[1] - span[0])))
 
 
 def _expand_symbolic_comparators(value: str) -> str:
@@ -802,60 +917,114 @@ def _compare(left: TypedValue, right: TypedValue) -> int | None:
 def _aggregate(
     tables: tuple[StructuredTable, ...],
     *,
+    filter_required: bool,
     grouped: bool,
     idempotency_key: str,
     question: str,
     run_id: UUID,
 ) -> StructuredAnalysisResult:
     table = tables[0]
-    conditions = _conditions(table, question)
-    rows = [
-        row for selected in tables for row in selected.rows if _row_matches(row, conditions)
-    ]
     examined = sum(len(selected.rows) for selected in tables)
     malformed = sum(selected.malformed_rows for selected in tables)
-    operation = _aggregate_operation(question)
-    mentioned = _mentioned_columns(table, question)
-    group_columns = _group_columns(table, question) if grouped else []
-    numeric_columns = [
-        index
-        for index in range(len(table.headers))
-        if any(row.values[index].kind == "number" for row in rows)
-    ]
-    value_column = next(
-        (
-            index
-            for index in mentioned
-            if index in numeric_columns and index not in group_columns
-        ),
-        numeric_columns[0] if len(numeric_columns) == 1 else None,
+    conditions = _conditions(table, question)
+    condition_error = _condition_validation_error(
+        table, conditions, question=question, required=filter_required
     )
-    if operation != "count" and value_column is None:
+    if condition_error is not None:
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=f"Analysis capability failed: {condition_error}",
+        )
+    all_rows = [row for selected in tables for row in selected.rows]
+    rows = [row for row in all_rows if _row_matches(row, conditions)]
+    group_columns = _group_columns(table, question) if grouped else []
+    if grouped and not group_columns:
         return _analysis_failure(
             tables,
             examined=examined,
             malformed=malformed,
             message=(
-                "Analysis capability failed: the requested numeric field is "
-                "ambiguous or unavailable."
+                "Analysis capability failed: the requested grouping field could not "
+                "be resolved unambiguously."
             ),
         )
+    metrics = _aggregate_metrics(
+        table,
+        question,
+        condition_columns={
+            index
+            for condition in conditions
+            for index in (condition.column, condition.other_column)
+            if index is not None
+        },
+        group_columns=group_columns,
+        rows=all_rows,
+    )
+    if not metrics:
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=(
+                "Analysis capability failed: every requested metric could not be "
+                "resolved to a supported operation and field."
+            ),
+        )
+    order_by = _order_specs(table, question)
+    if _ordering_requested(question) and not order_by:
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=(
+                "Analysis capability failed: the requested ordering field could not "
+                "be resolved unambiguously."
+            ),
+        )
+    if order_by and any(order.column not in group_columns for order in order_by):
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=(
+                "Analysis capability failed: aggregate results can currently be "
+                "ordered only by their grouping fields."
+            ),
+        )
+    execution_plan = _ValidatedExecutionPlan(
+        conditions=conditions,
+        group_columns=tuple(group_columns),
+        metrics=metrics,
+        order_by=order_by,
+    )
     grouped_rows: list[tuple[tuple[int, ...], tuple[str, ...], list[StructuredRow]]] = []
-    if not group_columns:
+    if not execution_plan.group_columns:
         grouped_rows.append(((), (), rows))
     else:
         groups: dict[tuple[str, ...], list[StructuredRow]] = defaultdict(list)
         for row in rows:
-            if all(group_index < len(row.values) for group_index in group_columns):
-                key = tuple(row.values[group_index].raw for group_index in group_columns)
+            if all(
+                group_index < len(row.values) for group_index in execution_plan.group_columns
+            ):
+                key = tuple(
+                    row.values[group_index].raw for group_index in execution_plan.group_columns
+                )
                 groups[key].append(row)
         grouped_rows.extend(
-            (tuple(group_columns), group, group_rows)
+            (execution_plan.group_columns, group, group_rows)
             for group, group_rows in sorted(
                 groups.items(), key=lambda item: tuple(value.casefold() for value in item[0])
             )
         )
-    if len(grouped_rows) > EXHAUSTIVE_EXTRACTION_CLAIM_LIMIT:
+        if execution_plan.order_by:
+            grouped_rows = _sort_grouped_rows(
+                grouped_rows,
+                order_by=execution_plan.order_by,
+            )
+    result_count = len(grouped_rows) * len(execution_plan.metrics)
+    if result_count > EXHAUSTIVE_EXTRACTION_CLAIM_LIMIT:
         return _analysis_failure(
             tables,
             examined=examined,
@@ -869,41 +1038,51 @@ def _aggregate(
     claims: list[ClaimRecord] = []
     audits: list[RowAudit] = []
     for group_indexes, group_values, group_rows in grouped_rows:
-        calculated = _calculate(operation, group_rows, value_column=value_column)
-        if calculated is None:
-            continue
-        value, unit, contributor_rows = calculated
-        if operation == "count":
-            label = "Count"
-        else:
-            assert value_column is not None
-            label = f"{operation.title()} {table.headers[value_column]}"
-        group_label = ""
-        if group_indexes:
-            parts = [
-                f"{table.headers[index]} {value}"
-                for index, value in zip(group_indexes, group_values, strict=True)
-            ]
-            group_label = f" for {', '.join(parts)}"
-        rendered = _render_decimal(value)
-        rendered_with_unit = f"{rendered} {unit}" if unit else rendered
-        claims.append(
-            _claim(
-                citations=_representative_citations(
-                    contributor_rows, fallback=table.header_citation
-                ),
-                idempotency_key=idempotency_key,
-                index=len(claims),
-                run_id=run_id,
-                text=f"{label}{group_label} is {rendered_with_unit}.",
-                value=rendered_with_unit,
+        for metric in execution_plan.metrics:
+            calculated = _calculate(metric.operation, group_rows, value_column=metric.column)
+            if calculated is None:
+                return _analysis_failure(
+                    tables,
+                    examined=examined,
+                    malformed=malformed,
+                    message=(
+                        "Analysis capability failed: a requested metric could not be "
+                        "calculated for every result group."
+                    ),
+                )
+            value, unit, contributor_rows = calculated
+            if metric.operation == "count":
+                label = "Count"
+            else:
+                assert metric.column is not None
+                label = f"{metric.operation.title()} {table.headers[metric.column]}"
+            group_label = ""
+            if group_indexes:
+                parts = [
+                    f"{table.headers[index]} {group_value}"
+                    for index, group_value in zip(group_indexes, group_values, strict=True)
+                ]
+                group_label = f" for {', '.join(parts)}"
+            rendered = _render_decimal(value)
+            rendered_with_unit = f"{rendered} {unit}" if unit else rendered
+            claims.append(
+                _claim(
+                    citations=_representative_citations(
+                        contributor_rows, fallback=table.header_citation
+                    ),
+                    idempotency_key=idempotency_key,
+                    index=len(claims),
+                    run_id=run_id,
+                    text=f"{label}{group_label} is {rendered_with_unit}.",
+                    value=rendered_with_unit,
+                )
             )
-        )
-        audits.extend(_audits(contributor_rows, operation=operation))
+            audits.extend(_audits(contributor_rows, operation=metric.operation))
     status: AnalysisStatus = "incomplete" if malformed else "complete"
+    operations = ", ".join(dict.fromkeys(metric.operation for metric in execution_plan.metrics))
     message = _bounded_message(
         f"Examined {examined} rows across {len(tables)} table(s); {len(rows)} matched. "
-        f"Calculated {operation} for {len(claims)} result group(s)."
+        f"Calculated {operations} across {len(grouped_rows)} result group(s)."
         + (f" {malformed} malformed row(s) were excluded." if malformed else "")
     )
     return StructuredAnalysisResult(
@@ -923,18 +1102,53 @@ def _list_or_summarize(
     tables: tuple[StructuredTable, ...],
     *,
     exception_only: bool,
+    filter_required: bool,
     idempotency_key: str,
+    order_required: bool,
     question: str,
     run_id: UUID,
 ) -> StructuredAnalysisResult:
     table = tables[0]
+    examined = sum(len(selected.rows) for selected in tables)
+    malformed = sum(selected.malformed_rows for selected in tables)
     conditions = _conditions(table, question)
+    condition_error = _condition_validation_error(
+        table, conditions, question=question, required=filter_required
+    )
+    if condition_error is not None:
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=f"Analysis capability failed: {condition_error}",
+        )
+    order_by = _order_specs(table, question)
+    if order_required and not order_by:
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=(
+                "Analysis capability failed: the requested ordering field could not "
+                "be resolved unambiguously."
+            ),
+        )
     rows = [
         row for selected in tables for row in selected.rows if _row_matches(row, conditions)
     ]
-    examined = sum(len(selected.rows) for selected in tables)
-    malformed = sum(selected.malformed_rows for selected in tables)
+    if order_by:
+        rows = _sort_rows(rows, order_by=order_by)
     columns = _mentioned_columns(table, question)
+    projection_error = _projection_validation_error(
+        table, question, filter_required=filter_required
+    )
+    if projection_error is not None:
+        return _analysis_failure(
+            tables,
+            examined=examined,
+            malformed=malformed,
+            message=f"Analysis capability failed: {projection_error}",
+        )
     condition_columns = {condition.column for condition in conditions}
     output_columns = [index for index in columns if index not in condition_columns]
     if not output_columns:
@@ -952,6 +1166,11 @@ def _list_or_summarize(
         # row rather than silently dropping fields the caller needs to audit it.
         identity = _identity_columns(table, rows)
         output_columns = list(dict.fromkeys([*identity[:1], *range(len(table.headers))]))
+    execution_plan = _ValidatedExecutionPlan(
+        conditions=conditions,
+        order_by=order_by,
+        output_columns=tuple(output_columns),
+    )
     result_count = len(rows) if row_level else len(rows) * len(output_columns)
     if result_count > EXHAUSTIVE_EXTRACTION_CLAIM_LIMIT:
         return _analysis_failure(
@@ -966,7 +1185,9 @@ def _list_or_summarize(
     claims: list[ClaimRecord] = []
     audits: list[RowAudit] = []
     for row in rows:
-        valid_columns = [column for column in output_columns if column < len(row.values)]
+        valid_columns = [
+            column for column in execution_plan.output_columns if column < len(row.values)
+        ]
         if row_level:
             rendered = [
                 f"{table.headers[column]}: {row.values[column].raw or 'null'}"
@@ -1501,19 +1722,267 @@ def _sum_column(rows: list[StructuredRow], column: int) -> tuple[Decimal, str | 
     return None if calculated is None else (calculated[0], calculated[1])
 
 
-def _aggregate_operation(question: str) -> str:
-    normalized = question.casefold()
-    if re.search(r"\b(?:count|how\s+many)\b", normalized):
-        return "count"
-    if re.search(r"\b(?:average|avg|mean)\b", normalized):
-        return "average"
-    if re.search(r"\b(?:minimum|min|lowest)\b", normalized):
-        return "minimum"
-    if re.search(r"\b(?:maximum|max|highest)\b", normalized):
-        return "maximum"
-    if re.search(r"\b(?:break\s*down|group(?:ed)?)\b", normalized):
-        return "count"
-    return "sum"
+def _aggregation_requested(question: str) -> bool:
+    return (
+        re.search(
+            r"\b(?:average|avg|break\s*down|count|how\s+many|maximum|max|mean|"
+            r"minimum|min|number\s+of|sum|total)\b",
+            question,
+            re.I,
+        )
+        is not None
+    )
+
+
+def _grouping_requested(question: str) -> bool:
+    without_order = re.sub(r"\b(?:ordered?|sorted?)\s+by\b[^?,;]*", "", question, flags=re.I)
+    return (
+        re.search(
+            r"\b(?:break\s*down|for\s+each|group(?:ed)?(?:\s+\w+){0,4}\s+by|per)\b|\bby\b",
+            without_order,
+            re.I,
+        )
+        is not None
+    )
+
+
+def _ordering_requested(question: str) -> bool:
+    return (
+        re.search(
+            r"\b(?:(?:order(?:ed)?|sort(?:ed)?)\s+by|ascending\s+order|"
+            r"descending\s+order|chronological\s+order)\b",
+            question,
+            re.I,
+        )
+        is not None
+    )
+
+
+def _condition_validation_error(
+    table: StructuredTable,
+    conditions: tuple[_Condition, ...],
+    *,
+    question: str,
+    required: bool,
+) -> str | None:
+    if required and not conditions:
+        return "the requested filter could not be compiled against the table schema."
+    normalized = _normalized_text(_expand_symbolic_comparators(question))
+    comparison_count = len(
+        re.findall(
+            r"\b(?:on\s+or\s+after|on\s+or\s+before|no\s+earlier\s+than|"
+            r"no\s+later\s+than|at\s+least|at\s+most|greater\s+than|"
+            r"more\s+than|less\s+than|after|before|over|under|above|below)\b",
+            normalized,
+        )
+    )
+    implicit_count = 0
+    for header in table.headers:
+        header_key = _normalized_text(header)
+        implicit_count += len(
+            re.findall(
+                rf"\b(?:and|where|with)\s+{re.escape(header_key)}\s+"
+                r"(?!(?:(?:is|are)\s+)?(?:on\s+or|no\s+(?:earlier|later)|at\s+"
+                r"(?:least|most)|greater|more|less|after|before|over|under|"
+                r"above|below)\b)",
+                normalized,
+            )
+        )
+    expected = comparison_count + implicit_count
+    if required and len(conditions) < expected:
+        return "not every requested filter clause could be compiled and validated."
+    for condition in conditions:
+        if condition.value is None or condition.operator in {"is_null", "not_null"}:
+            continue
+        compatible = any(
+            condition.column < len(row.values)
+            and not row.values[condition.column].is_null
+            and _compare(row.values[condition.column], condition.value) is not None
+            for row in table.rows
+        )
+        if not compatible:
+            return "a filter value is incompatible with the resolved field type."
+    return None
+
+
+def _requested_metric_operations(question: str) -> tuple[AggregateOperation, ...]:
+    patterns: tuple[tuple[AggregateOperation, str], ...] = (
+        ("average", r"\b(?:average|avg|mean)\b"),
+        ("minimum", r"\b(?:minimum|min|lowest)\b"),
+        ("maximum", r"\b(?:maximum|max|highest)\b"),
+        ("sum", r"\b(?:sum|total)\b"),
+    )
+    return tuple(
+        operation for operation, pattern in patterns if re.search(pattern, question, re.I)
+    )
+
+
+def _metric_operation_mentions(
+    question: str,
+) -> list[tuple[int, int, AggregateOperation]]:
+    normalized = _normalized_text(question)
+    patterns: tuple[tuple[AggregateOperation, str], ...] = (
+        ("average", r"\b(?:average|avg|mean)\b"),
+        ("minimum", r"\b(?:minimum|min|lowest)\b"),
+        ("maximum", r"\b(?:maximum|max|highest)\b"),
+        ("sum", r"\b(?:sum|total)\b"),
+    )
+    return sorted(
+        (match.start(), match.end(), operation)
+        for operation, pattern in patterns
+        for match in re.finditer(pattern, normalized)
+    )
+
+
+def _aggregate_metrics(
+    table: StructuredTable,
+    question: str,
+    *,
+    condition_columns: set[int],
+    group_columns: list[int],
+    rows: list[StructuredRow],
+) -> tuple[_Metric, ...]:
+    numeric = {
+        index
+        for index in range(len(table.headers))
+        if any(index < len(row.values) and row.values[index].kind == "number" for row in rows)
+    }
+    mentioned_numeric = [
+        index
+        for index in _mentioned_columns(table, question)
+        if index in numeric and index not in group_columns
+    ]
+    count_requested = (
+        re.search(r"\b(?:count|how\s+many|number\s+of)\b", question, re.I) is not None
+    )
+    operation_mentions = _metric_operation_mentions(question)
+    operations = _requested_metric_operations(question)
+    if count_requested and not operation_mentions:
+        mentioned_numeric = [
+            column for column in mentioned_numeric if column not in condition_columns
+        ]
+    metrics: list[_Metric] = []
+    if count_requested:
+        metrics.append(_Metric(column=None, operation="count"))
+    if mentioned_numeric and operation_mentions:
+        normalized = _normalized_text(question)
+        column_positions = {
+            column: match.start()
+            for column in mentioned_numeric
+            if (
+                match := re.search(
+                    rf"\b{re.escape(_normalized_text(table.headers[column]))}\b",
+                    normalized,
+                )
+            )
+            is not None
+        }
+        bound_columns: set[int] = set()
+        for start, end, operation in operation_mentions:
+            following = [
+                (position - end, column)
+                for column, position in column_positions.items()
+                if position >= end
+            ]
+            candidates = following or [
+                (abs(position - start), column) for column, position in column_positions.items()
+            ]
+            if not candidates:
+                return ()
+            column = min(candidates)[1]
+            metrics.append(_Metric(column=column, operation=operation))
+            bound_columns.add(column)
+        unbound = [
+            column
+            for column in mentioned_numeric
+            if column not in bound_columns and column not in condition_columns
+        ]
+        unique_operations = set(operations)
+        if unbound and len(unique_operations) == 1:
+            operation = next(iter(unique_operations))
+            metrics.extend(_Metric(column=column, operation=operation) for column in unbound)
+        elif unbound:
+            return ()
+    elif mentioned_numeric:
+        if count_requested:
+            metrics.extend(
+                _Metric(column=column, operation="sum") for column in mentioned_numeric
+            )
+    elif operations:
+        fallback_columns = sorted(numeric - set(group_columns))
+        if len(fallback_columns) == 1:
+            metrics.extend(
+                _Metric(column=fallback_columns[0], operation=operation)
+                for operation in operations
+            )
+        elif not count_requested:
+            return ()
+    if not metrics and re.search(r"\b(?:break\s*down|group(?:ed)?)\b", question, re.I):
+        metrics.append(_Metric(column=None, operation="count"))
+    return tuple(dict.fromkeys(metrics))
+
+
+def _order_specs(table: StructuredTable, question: str) -> tuple[_Order, ...]:
+    match = re.search(
+        r"\b(?:order(?:ed)?|sort(?:ed)?)\s+by\s+(?P<field>[^?,;]+)",
+        question,
+        re.I,
+    )
+    field = match.group("field") if match is not None else ""
+    direction: SortDirection = (
+        "desc"
+        if re.search(r"\b(?:desc(?:ending)?|latest|newest|highest)\b", field or question, re.I)
+        else "asc"
+    )
+    columns = _mentioned_columns(table, field) if field else []
+    if not columns and re.search(r"\bchronological\s+order\b", question, re.I):
+        date_columns = [
+            index
+            for index in range(len(table.headers))
+            if any(row.values[index].kind == "date" for row in table.rows)
+        ]
+        columns = date_columns if len(date_columns) == 1 else []
+    return tuple(_Order(column=column, direction=direction) for column in columns)
+
+
+def _sort_rows(
+    rows: list[StructuredRow], *, order_by: tuple[_Order, ...]
+) -> list[StructuredRow]:
+    def compare(left: StructuredRow, right: StructuredRow) -> int:
+        return _compare_ordered_rows(left, right, order_by=order_by)
+
+    return sorted(rows, key=cmp_to_key(compare))
+
+
+def _compare_ordered_rows(
+    left: StructuredRow,
+    right: StructuredRow,
+    *,
+    order_by: tuple[_Order, ...],
+) -> int:
+    for order in order_by:
+        left_value = left.values[order.column]
+        right_value = right.values[order.column]
+        if left_value.is_null != right_value.is_null:
+            return 1 if left_value.is_null else -1
+        comparison = _compare(left_value, right_value)
+        if comparison:
+            return comparison if order.direction == "asc" else -comparison
+    return 0
+
+
+def _sort_grouped_rows(
+    groups: list[tuple[tuple[int, ...], tuple[str, ...], list[StructuredRow]]],
+    *,
+    order_by: tuple[_Order, ...],
+) -> list[tuple[tuple[int, ...], tuple[str, ...], list[StructuredRow]]]:
+    def compare(
+        left: tuple[tuple[int, ...], tuple[str, ...], list[StructuredRow]],
+        right: tuple[tuple[int, ...], tuple[str, ...], list[StructuredRow]],
+    ) -> int:
+        return _compare_ordered_rows(left[2][0], right[2][0], order_by=order_by)
+
+    return sorted(groups, key=cmp_to_key(compare))
 
 
 def _group_column(table: StructuredTable, question: str) -> int | None:
@@ -1521,8 +1990,48 @@ def _group_column(table: StructuredTable, question: str) -> int | None:
     return columns[0] if len(columns) == 1 else None
 
 
+def _projection_validation_error(
+    table: StructuredTable, question: str, *, filter_required: bool
+) -> str | None:
+    if filter_required:
+        return None
+    match = re.search(r"\b(?:enumerate|identify|list|show)\b\s+(?P<fields>.+)", question, re.I)
+    if match is None:
+        return None
+    fields = re.split(
+        r"\b(?:ordered?|sorted?)\s+by\b", match.group("fields"), maxsplit=1, flags=re.I
+    )[0]
+    fields = re.sub(r"\s+for\s+(?:all|each|every)\s+\w+.*$", "", fields, flags=re.I)
+    segments = [
+        segment.strip()
+        for segment in re.split(r"\s+and\s+|,", fields, flags=re.I)
+        if segment.strip()
+    ]
+    multiple = len(segments) > 1
+    for segment in segments:
+        if any(_column_score(header, segment) > 0 for header in table.headers):
+            continue
+        meaningful = [
+            token
+            for token in normalized_query_tokens(segment)
+            if token not in _QUESTION_STOPWORDS
+        ]
+        if meaningful and (multiple or len(meaningful) > 1):
+            return "a requested output field could not be resolved in the table schema."
+    return None
+
+
 def _group_columns(table: StructuredTable, question: str) -> list[int]:
-    match = re.search(r"\b(?:by|per)\s+(?P<field>[^?,;]+)", question, re.I)
+    without_order = re.sub(
+        r"\b(?:order(?:ed)?|sort(?:ed)?)\s+by\s+[^?,;]+", "", question, flags=re.I
+    )
+    match = re.search(
+        r"\b(?:by|per|for\s+each)\s+(?P<field>.+?)"
+        r"(?=\s+(?:across|average|count|including|list|number|show|sum|total)\b|"
+        r"[,?;]|$)",
+        without_order,
+        re.I,
+    )
     if match is None:
         return []
     return [
@@ -1690,11 +2199,11 @@ def _operator(value: str) -> Literal["eq", "ge", "gt", "le", "lt", "ne"]:
         return "ne"
     if normalized in {">", "greater than", "more than", "over", "above", "after"}:
         return "gt"
-    if normalized in {">=", "at least"}:
+    if normalized in {">=", "at least", "no earlier than", "on or after"}:
         return "ge"
     if normalized in {"<", "less than", "under", "below", "before"}:
         return "lt"
-    if normalized in {"<=", "at most"}:
+    if normalized in {"<=", "at most", "no later than", "on or before"}:
         return "le"
     return "eq"
 
@@ -1711,6 +2220,12 @@ def _parse_date(value: str) -> date | None:
         if _NORMALIZED_SLASH_DATE.fullmatch(value):
             month, day, year = (int(part) for part in value.split())
             return date(year, month, day)
+        normalized = " ".join(value.replace(",", " ").split())
+        for date_format in ("%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"):
+            try:
+                return datetime.strptime(normalized, date_format).date()
+            except ValueError:
+                continue
     except ValueError:
         return None
     return None
