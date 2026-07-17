@@ -137,6 +137,11 @@ class GoogleOAuthProvider:
             raw_id_token = credentials.id_token
             raw_refresh_token = credentials.refresh_token
             granted_scopes = credentials.granted_scopes
+            if granted_scopes is None:
+                # RFC 6749 permits the token endpoint to omit `scope` when the
+                # grant is unchanged. google-auth preserves the requested scopes
+                # separately, so use them only for that omitted-field case.
+                granted_scopes = credentials.scopes
             if not isinstance(raw_access_token, str) or not raw_access_token:
                 raise GoogleOAuthError(
                     "Google did not return an access token",
