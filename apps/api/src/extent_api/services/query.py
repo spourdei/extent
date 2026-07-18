@@ -445,23 +445,24 @@ class QueryService:
         execution_question = normalized_question
         deterministic_plan = plan_query(normalized_question)
         deterministic_exhaustive_request = parse_exhaustive_request(normalized_question)
+        deterministic_complete_route = deterministic_plan.requires_complete_data or isinstance(
+            deterministic_exhaustive_request,
+            (ExhaustiveRequest, ExhaustiveRequestNeedsClarification),
+        )
         source_state_question = _SOURCE_STATE_QUESTION.search(normalized_question) is not None
         interpretation: ModelQueryInterpretation | None = None
-        if (
-            source_state_question
-            or deterministic_plan.requires_complete_data
-            or isinstance(
-                deterministic_exhaustive_request,
-                (ExhaustiveRequest, ExhaustiveRequestNeedsClarification),
-            )
-        ):
+        if source_state_question or deterministic_complete_route:
             interpretation = _interpret_for_routing(
                 self._answer_provider,
                 question=normalized_question,
             )
-            if interpretation is not None and _safe_canonical_question(
-                normalized_question,
-                interpretation.canonical_question,
+            if (
+                not deterministic_complete_route
+                and interpretation is not None
+                and _safe_canonical_question(
+                    normalized_question,
+                    interpretation.canonical_question,
+                )
             ):
                 execution_question = " ".join(interpretation.canonical_question.strip().split())
 
@@ -473,10 +474,10 @@ class QueryService:
             ),
         )
         exhaustive_request = parse_exhaustive_request(execution_question)
-        if deterministic_plan.mode == "exhaustive" and isinstance(
-            deterministic_exhaustive_request, ExhaustiveRequest
-        ):
+        if deterministic_complete_route:
+            execution_question = normalized_question
             query_plan = deterministic_plan
+            exhaustive_request = deterministic_exhaustive_request
 
         if source_state_question or _SOURCE_STATE_QUESTION.search(execution_question):
             stored = self._repository.store_publication_result(

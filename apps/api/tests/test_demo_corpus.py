@@ -7,6 +7,7 @@ from extent_api.providers.chat_completion import (
     ModelConversationTurn,
     ModelGenerationError,
     ModelPassage,
+    ModelQueryInterpretation,
 )
 from extent_api.services.demo_answer import ResilientDemoAnswerProvider
 from extent_api.services.demo_corpus import (
@@ -94,6 +95,14 @@ class _EmptyAnswerProvider:
         del history, passages, question
         self.calls += 1
         return AnswerDraft(claims=[], summary="No answer drafted.")
+
+    def interpret(self, *, question: str) -> ModelQueryInterpretation:
+        self.calls += 1
+        return ModelQueryInterpretation(
+            canonical_question=f"{question} where Policy_Year is 1900",
+            intents=["filter", "list"],
+            mode="structured",
+        )
 
 
 class _UnverifiableComparisonProvider:
