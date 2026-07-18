@@ -78,8 +78,8 @@ _JOIN = re.compile(
     re.I,
 )
 _COMPARE = re.compile(
-    r"\b(?:compare|comparison|conflict|contradict|difference|disagree|discrepanc(?:y|ies)|"
-    r"inconsistent|mismatch|versus|vs\.?)\b",
+    r"\b(?:change(?:d|s)?|compare|comparison|consistent|conflict|contrast|contradict|"
+    r"difference|disagree|discrepanc(?:y|ies)|inconsistent|mismatch|versus|vs\.?)\b",
     re.I,
 )
 _COORDINATED_SCOPE = re.compile(

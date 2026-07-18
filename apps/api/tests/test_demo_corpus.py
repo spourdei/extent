@@ -318,7 +318,7 @@ def test_named_minimum_comparison_recovers_the_two_scoped_values() -> None:
         workspace_id=DEMO_WORKSPACE_ID,
     )
 
-    assert provider.calls == 3
+    assert provider.calls == 1
     assert result.status == "conflict"
     assert {citation.raw_value for citation in result.claims[0].citations} == {
         "USD 250,000",
