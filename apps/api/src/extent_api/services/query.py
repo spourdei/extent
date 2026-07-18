@@ -113,6 +113,8 @@ _STOPWORDS = {
     "and",
     "are",
     "does",
+    "did",
+    "do",
     "for",
     "from",
     "have",
@@ -155,10 +157,12 @@ _EXPLICIT_COMPLETE_SCOPE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_STATE_QUESTION = re.compile(
-    r"\b(?:folder|files?|sources?)\b.{0,100}\b(?:available|complete|expected|found|"
-    r"incomplete|missing|ready|sync(?:ed|hronized)?)\b|"
-    r"\b(?:available|complete|expected|found|incomplete|missing|ready)\b.{0,100}"
-    r"\b(?:folder|files?|sources?)\b",
+    r"\b(?:documents?|folder|files?|sources?)\b.{0,100}\b(?:available|checked|complete|"
+    r"expected|found|incomplete|missing|processed|read|ready|unavailable|"
+    r"sync(?:ed|hronized)?)\b|"
+    r"\b(?:available|checked|complete|discovery|expected|found|incomplete|missing|"
+    r"processed|read|ready)\b.{0,100}"
+    r"\b(?:documents?|folder|files?|sources?)\b",
     re.IGNORECASE,
 )
 _RETRIEVAL_CANDIDATE_LIMIT = 32
@@ -168,7 +172,7 @@ _PASSAGE_EXCERPT_LIMIT = 280
 _BROAD_COMPARISON_EXCERPT_LIMIT = 1_800
 _CLARIFICATION_MESSAGE = "Which prior value or subject do you mean?"
 _EXPLICIT_MULTI_FACT_QUESTION = re.compile(
-    r"\b(?:break\s*down|compare|comparison|differences?|list|summari[sz]e|"
+    r"\b(?:break\s*down|compare|comparison|contrast|differences?|list|summari[sz]e|"
     r"what\s+are|which\s+are)\b",
     re.IGNORECASE,
 )
@@ -196,6 +200,45 @@ _CONFLICT_SEEKING_QUESTION = re.compile(
     r"do(?:es)?\s+not\s+match|not\s+match)\b",
     re.IGNORECASE,
 )
+_RECONCILIATION_STATUS_HEADER = re.compile(
+    r"\b(?:disposition|outcome|reconciliation|resolution|result|status)\b",
+    re.IGNORECASE,
+)
+_VERSION_SCOPE = re.compile(
+    r"\b(?:rev(?:ision)?|version|v(?=\s*\d))\s*"
+    r"(?P<identifier>[A-Za-z0-9_.-]+)\b",
+    re.IGNORECASE,
+)
+_COMPARISON_FIELD_NOISE = {
+    "acceptance",
+    "accepted",
+    "after",
+    "before",
+    "between",
+    "bound",
+    "change",
+    "changed",
+    "changes",
+    "compare",
+    "comparison",
+    "consistent",
+    "conflict",
+    "contrast",
+    "currently",
+    "difference",
+    "differences",
+    "did",
+    "disagree",
+    "discrepancies",
+    "discrepancy",
+    "do",
+    "inconsistent",
+    "mismatch",
+    "resolved",
+    "unresolved",
+    "versus",
+    "vs",
+}
 _NON_EVIDENTIARY_REQUEST = re.compile(
     r"\b(?:forecast|predict|recommend)\b|"
     r"\bshould\b.{0,80}\b(?:choose|select|buy)\b|"
@@ -220,13 +263,13 @@ _TERSE_ANALYTICAL_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _STRUCTURED_VALUE_QUESTION = re.compile(
-    r"^\s*(?:(?:what(?:'s|s|\s+(?:is|are|was|were))|"
+    r"^\s*(?:(?:what\b|what(?:'s|s|\s+(?:is|are|was|were))|"
     r"what\b.{1,60}\b(?:is|are|was|were)\s+"
     r"(?:listed|shown|recorded|provided)|"
     r"which\s+(?:is|are|was|were)|who\b|"
     r"where\s+(?:is|are|was|were)|"
     r"when(?:\s+(?:is|are|was|were))?|how\s+(?:much|many)|"
-    r"(?:show|give|tell)\s+(?:me\s+)?)\b)",
+    r"(?:provide|report|return|show|state|give|tell)\s+(?:me\s+)?)\b)",
     re.IGNORECASE,
 )
 _FIELD_SCOPE_PREPOSITION = re.compile(r"\b(?:at|for|from|in|of|on)\b", re.IGNORECASE)
@@ -431,6 +474,10 @@ class QueryService:
             ),
         )
         exhaustive_request = parse_exhaustive_request(execution_question)
+        if deterministic_plan.mode == "exhaustive" and isinstance(
+            deterministic_exhaustive_request, ExhaustiveRequest
+        ):
+            query_plan = deterministic_plan
 
         if source_state_question or _SOURCE_STATE_QUESTION.search(execution_question):
             stored = self._repository.store_publication_result(
@@ -486,6 +533,15 @@ class QueryService:
         )
         if complete_result is not None:
             return complete_result
+        scalar_table_result = self._execute_scalar_table_route(
+            context=context,
+            idempotency_key=idempotency_key,
+            now=now,
+            plan=query_plan,
+            question=normalized_question,
+        )
+        if scalar_table_result is not None:
+            return scalar_table_result
         if isinstance(exhaustive_request, ExhaustiveRequestNeedsClarification):
             stored = self._repository.store_publication_result(
                 claims=(),
@@ -623,13 +679,12 @@ class QueryService:
 
         evidence_blocks = _evidence_blocks(candidates, passages=passages, context=context)
         prepared_comparison_recovery = (
-            _comparison_recovery_draft(
+            _prepared_comparison_recovery(
                 candidates,
-                passages=passages,
                 idempotency_key=idempotency_key,
                 question=normalized_question,
             )
-            if _BROAD_COMPARISON_QUESTION.search(normalized_question) is not None
+            if _requires_multi_branch_comparison(normalized_question, plan=query_plan)
             else None
         )
         generation_question = _generation_question(
@@ -637,10 +692,14 @@ class QueryService:
             plan=query_plan,
         )
         try:
-            draft = self._answer_provider.generate(
-                history=model_history,
-                passages=_model_passages(passages),
-                question=generation_question,
+            draft = (
+                prepared_comparison_recovery
+                if prepared_comparison_recovery is not None
+                else self._answer_provider.generate(
+                    history=model_history,
+                    passages=_model_passages(passages),
+                    question=generation_question,
+                )
             )
         except ModelGenerationError as first_error:
             if prepared_comparison_recovery is not None:
@@ -687,6 +746,19 @@ class QueryService:
                         question=normalized_question,
                     )
                     return project_question_result(stored)
+
+        if prepared_comparison_recovery is not None:
+            draft = prepared_comparison_recovery
+            evidence_blocks = _evidence_blocks(
+                candidates,
+                additional_block_ids={
+                    reference.block_id
+                    for claim in prepared_comparison_recovery.claims
+                    for reference in claim.evidence
+                },
+                context=context,
+                passages=passages,
+            )
 
         draft_interpretation = _draft_query_interpretation(draft)
         if draft_interpretation is not None and _safe_canonical_question(
@@ -957,6 +1029,37 @@ class QueryService:
         )
         return project_question_result(stored)
 
+    def _execute_scalar_table_route(
+        self,
+        *,
+        context: QueryContext,
+        idempotency_key: str,
+        now: datetime,
+        plan: QueryPlan,
+        question: str,
+    ) -> WorkspaceQuestionResultView | None:
+        """Use the existing table executor for one unambiguous requested cell."""
+
+        if set(plan.intents) != {"lookup"} or not _question_prefers_structured_value(question):
+            return None
+        analysis = analyze_structured_question(
+            self._repository.list_ready_blocks(context=context),
+            idempotency_key=idempotency_key,
+            plan=plan,
+            question=question,
+            run_id=context.run_id,
+        )
+        if not _structured_scalar_is_unambiguous(analysis, question=question):
+            return None
+        return self._store_structured_analysis(
+            analysis,
+            context=context,
+            idempotency_key=idempotency_key,
+            now=now,
+            plan=plan,
+            question=question,
+        )
+
     def _execute_complete_route(
         self,
         *,
@@ -978,6 +1081,15 @@ class QueryService:
                 question=execution_question,
                 run_id=context.run_id,
             )
+            if plan.mode == "exhaustive" and isinstance(exhaustive_request, ExhaustiveRequest):
+                return self._extract_values(
+                    blocks=ready_blocks,
+                    context=context,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                    question=display_question,
+                    request=exhaustive_request,
+                )
             # Complete-data execution remains authoritative after the model has
             # interpreted the question. Sampled retrieval cannot safely replace
             # a failed aggregate, exhaustive, grouped, or joined operation.
@@ -1095,7 +1207,7 @@ class QueryService:
             message = _incomplete_analysis_message(context, fallback=analysis.message)
         status = (
             "coverage_limited"
-            if gaps or not analysis.complete
+            if gaps or analysis.status == "incomplete"
             else "evidence_supported"
             if claims
             else "insufficient"
@@ -1314,6 +1426,19 @@ def _is_comparison_improvement(
     *,
     question: str | None = None,
 ) -> bool:
+    required_branches = (
+        _requested_comparison_branch_count(question) if question is not None else 2
+    )
+    if (
+        required_branches > 2
+        and _comparison_value_count(tuple(claim.text for claim in draft.claims))
+        < required_branches
+    ):
+        return False
+    if required_branches > 2:
+        return len(draft.claims) >= required_branches and all(
+            claim.evidence for claim in draft.claims
+        )
     has_comparison_claim = any(
         claim.relation in {"change", "conflict"} and len(claim.evidence) == 2
         for claim in draft.claims
@@ -1333,6 +1458,17 @@ def _publication_has_complete_comparison(
     *,
     question: str,
 ) -> bool:
+    required_branches = _requested_comparison_branch_count(question)
+    if (
+        required_branches > 2
+        and _comparison_value_count(tuple(claim.text for claim in publication.claims))
+        < required_branches
+    ):
+        return False
+    if required_branches > 2:
+        return len(publication.claims) >= required_branches and all(
+            claim.citations for claim in publication.claims
+        )
     if any(
         claim.relation in {"change", "conflict"} and len(claim.citations) == 2
         for claim in publication.claims
@@ -1344,6 +1480,38 @@ def _publication_has_complete_comparison(
         citation.block_id for claim in publication.claims for citation in claim.citations
     }
     return len(publication.claims) >= 2 and len(cited_blocks) >= 2
+
+
+def _requested_comparison_branch_count(question: str) -> int:
+    return max(2, len(_requested_comparison_scope_tokens(question)))
+
+
+def _requested_comparison_scope_tokens(question: str) -> tuple[tuple[str, ...], ...]:
+    version_scopes = list(_VERSION_SCOPE.finditer(question))
+    scopes: list[tuple[str, ...]] = []
+    for match in version_scopes:
+        tokens = _query_tokens(match.group(0))
+        if tokens and tokens not in scopes:
+            scopes.append(tokens)
+    if version_scopes:
+        trailing_scope = re.match(
+            r"^\s*,\s*(?:and\s+)?(?P<scope>[^\W\d_]+)",
+            question[version_scopes[-1].end() :],
+            re.IGNORECASE,
+        )
+        if trailing_scope is not None:
+            tokens = _query_tokens(trailing_scope.group("scope"))
+            if tokens and tokens not in scopes:
+                scopes.append(tokens)
+    return tuple(scopes[:3])
+
+
+def _comparison_value_count(texts: Sequence[str]) -> int:
+    values_by_kind: dict[str, set[str]] = {}
+    for text in texts:
+        for kind, _raw, canonical in _explicit_comparable_values(text):
+            values_by_kind.setdefault(kind, set()).add(canonical)
+    return max((len(values) for values in values_by_kind.values()), default=0)
 
 
 def _deterministic_comparison_recovery(
@@ -1362,9 +1530,13 @@ def _deterministic_comparison_recovery(
 
     if _BROAD_COMPARISON_QUESTION.search(question) is not None:
         return None
+    if _requested_comparison_branch_count(question) > 2:
+        return None
 
     by_kind: dict[str, list[tuple[PassageRecord, str, str]]] = {}
     for passage in passages:
+        if _COMPARISON_CALCULATION_QUESTION.search(passage.exact_quote) is not None:
+            continue
         values = _explicit_comparable_values(passage.exact_quote)
         for kind in {kind for kind, _, _ in values}:
             same_kind = [item for item in values if item[0] == kind]
@@ -1430,6 +1602,124 @@ def _deterministic_comparison_recovery(
     return None
 
 
+def _prepared_comparison_recovery(
+    candidates: list[RetrievedBlock],
+    *,
+    idempotency_key: str,
+    question: str,
+) -> AnswerDraft | None:
+    multi_scope = _deterministic_multi_scope_recovery(
+        candidates,
+        idempotency_key=idempotency_key,
+        question=question,
+    )
+    if multi_scope is not None:
+        return multi_scope
+    return _deterministic_reconciliation_recovery(
+        candidates,
+        idempotency_key=idempotency_key,
+        question=question,
+    )
+
+
+def _deterministic_multi_scope_recovery(
+    candidates: list[RetrievedBlock],
+    *,
+    idempotency_key: str,
+    question: str,
+) -> AnswerDraft | None:
+    scopes = _requested_comparison_scope_tokens(question)
+    if len(scopes) < 3:
+        return None
+    scope_tokens = {token for scope in scopes for token in scope}
+    field_tokens = tuple(
+        token
+        for token in _query_tokens(question)
+        if token not in scope_tokens and token not in _COMPARISON_FIELD_NOISE
+    )
+    if not field_tokens:
+        return None
+
+    matches_by_kind: dict[
+        str,
+        dict[int, tuple[tuple[int, int, int, int], RetrievedBlock, str, str]],
+    ] = {}
+    for scope_index, scope in enumerate(scopes):
+        for block in candidates:
+            source_context = " ".join((*block.path, block.source_name))
+            for raw_line in block.text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                combined = f"{source_context}\n{line}"
+                scope_coverage = _token_coverage(combined, tokens=scope)
+                if scope_coverage < len(scope):
+                    continue
+                field_coverage = _token_coverage(line, tokens=field_tokens)
+                if field_coverage == 0:
+                    continue
+                values = _explicit_comparable_values(line)
+                for kind in {value[0] for value in values}:
+                    same_kind = [value for value in values if value[0] == kind]
+                    if len(same_kind) != 1:
+                        continue
+                    _value_kind, raw_value, _canonical_value = same_kind[0]
+                    score = (
+                        field_coverage,
+                        _token_coverage(line, tokens=scope),
+                        scope_coverage,
+                        -len(line),
+                    )
+                    current = matches_by_kind.setdefault(kind, {}).get(scope_index)
+                    if current is None or score > current[0]:
+                        matches_by_kind[kind][scope_index] = (
+                            score,
+                            block,
+                            line,
+                            raw_value,
+                        )
+
+    preferred_kind = next(
+        (
+            kind
+            for kind in ("currency", "percent", "date", "identifier", "number", "status")
+            if len(matches_by_kind.get(kind, {})) == len(scopes)
+        ),
+        None,
+    )
+    if preferred_kind is None:
+        return None
+    field = " ".join(field_tokens)[:120]
+    claims: list[ClaimDraft] = []
+    for scope_index, scope in enumerate(scopes):
+        _score, block, exact_quote, raw_value = matches_by_kind[preferred_kind][scope_index]
+        scope_label = " ".join(scope)
+        claims.append(
+            ClaimDraft(
+                claim_id=uuid5(
+                    _COMPARISON_RECOVERY_NAMESPACE,
+                    f"{idempotency_key}:{scope_index}:{block.block_id}:{raw_value}",
+                ),
+                evidence=[
+                    DraftEvidenceRef(
+                        block_id=block.block_id,
+                        entity=scope_label,
+                        exact_quote=exact_quote,
+                        field=field,
+                        scope=scope_label,
+                        value=raw_value,
+                    )
+                ],
+                relation="fact",
+                text=f"{scope_label}: {raw_value}",
+            )
+        )
+    return AnswerDraft(
+        claims=claims,
+        summary="Recovered every named comparison scope from explicit source values.",
+    )
+
+
 def _comparison_recovery_draft(
     candidates: list[RetrievedBlock],
     *,
@@ -1437,13 +1727,13 @@ def _comparison_recovery_draft(
     idempotency_key: str,
     question: str,
 ) -> AnswerDraft | None:
-    reconciled = _deterministic_reconciliation_recovery(
+    prepared = _prepared_comparison_recovery(
         candidates,
         idempotency_key=idempotency_key,
         question=question,
     )
-    if reconciled is not None:
-        return reconciled
+    if prepared is not None:
+        return prepared
     if _BROAD_COMPARISON_QUESTION.search(question) is not None:
         return None
     return _deterministic_comparison_recovery(
@@ -1467,41 +1757,36 @@ def _deterministic_reconciliation_recovery(
     """
 
     claims: list[ClaimDraft] = []
-    question_tokens = _query_tokens(question)
-    broad_question = _BROAD_COMPARISON_QUESTION.search(question) is not None
     seen_fields: set[str] = set()
     for matrix in candidates:
         lines = [line.strip() for line in matrix.text.splitlines() if line.strip()]
         for header_index, header in enumerate(lines):
             header_cells = [cell.strip() for cell in header.split("\t")]
-            if len(header_cells) < 3 or not re.search(
-                r"\b(?:field|item|term|coverage|condition)\b",
-                header_cells[0],
-                re.IGNORECASE,
+            if (
+                len(header_cells) < 4
+                or not re.search(
+                    r"\b(?:condition|field|item|term)\b",
+                    header_cells[0],
+                    re.IGNORECASE,
+                )
+                or _RECONCILIATION_STATUS_HEADER.search(header_cells[-1]) is None
             ):
                 continue
             left_scope, right_scope = header_cells[1], header_cells[2]
-            if not broad_question and not (
-                _comparison_scope_matches_question(
-                    left_scope,
-                    question_tokens=question_tokens,
-                )
-                and _comparison_scope_matches_question(
-                    right_scope,
-                    question_tokens=question_tokens,
-                )
+            if not _reconciliation_scopes_cover_versions(
+                question,
+                scopes=(left_scope, right_scope),
             ):
                 continue
+            rows: list[tuple[str, str, str, str, str, str, str]] = []
             for row in lines[header_index + 1 :]:
                 cells = [cell.strip() for cell in row.split("\t")]
-                if len(cells) < 3:
+                if len(cells) < len(header_cells):
                     break
                 field, left_cell, right_cell = cells[:3]
                 left_values = _explicit_comparable_values(left_cell)
                 right_values = _explicit_comparable_values(right_cell)
                 if len(left_values) != 1 or len(right_values) != 1:
-                    continue
-                if not broad_question and _token_coverage(field, tokens=question_tokens) == 0:
                     continue
                 left_kind, left_raw, left_canonical = left_values[0]
                 right_kind, right_raw, right_canonical = right_values[0]
@@ -1511,7 +1796,38 @@ def _deterministic_reconciliation_recovery(
                 if status and re.search(r"\b(?:match(?:es)?|resolved|same)\b", status):
                     continue
                 field_key = " ".join(_query_tokens(field))
-                if not field_key or field_key in seen_fields:
+                if not field_key:
+                    continue
+                rows.append(
+                    (
+                        field,
+                        field_key,
+                        left_raw,
+                        right_raw,
+                        left_scope,
+                        right_scope,
+                        status,
+                    )
+                )
+            requested_fields = _requested_reconciliation_fields(
+                question,
+                fields=tuple(row[0] for row in rows),
+                scopes=(left_scope, right_scope),
+            )
+            if requested_fields == set():
+                continue
+            for (
+                field,
+                field_key,
+                left_raw,
+                right_raw,
+                left_scope,
+                right_scope,
+                _status,
+            ) in rows:
+                if field_key in seen_fields or (
+                    requested_fields is not None and field_key not in requested_fields
+                ):
                     continue
                 left_branch = _find_reconciliation_branch(
                     candidates,
@@ -1577,6 +1893,59 @@ def _deterministic_reconciliation_recovery(
         claims=claims,
         summary="Recovered mismatched fields from corroborated source evidence.",
     )
+
+
+def _reconciliation_scopes_cover_versions(
+    question: str,
+    *,
+    scopes: tuple[str, str],
+) -> bool:
+    requested = [
+        match.group("identifier").casefold() for match in _VERSION_SCOPE.finditer(question)
+    ]
+    if not requested:
+        return True
+    available = {
+        match.group("identifier").casefold()
+        for scope in scopes
+        for match in _VERSION_SCOPE.finditer(scope)
+    }
+    return all(identifier in available for identifier in requested)
+
+
+def _requested_reconciliation_fields(
+    question: str,
+    *,
+    fields: tuple[str, ...],
+    scopes: tuple[str, str],
+) -> set[str] | None:
+    scope_tokens = _query_tokens(" ".join(scopes))
+    version_tokens = {
+        token
+        for match in _VERSION_SCOPE.finditer(question)
+        for token in _query_tokens(match.group(0))
+    }
+    selectors = tuple(
+        token
+        for token in _query_tokens(question)
+        if token not in _COMPARISON_FIELD_NOISE
+        and token not in version_tokens
+        and not any(tokens_equivalent(token, scope) for scope in scope_tokens)
+    )
+    if not selectors:
+        return None
+    matched = {
+        " ".join(_query_tokens(field))
+        for field in fields
+        if any(
+            tokens_equivalent(selector, field_token)
+            for selector in selectors
+            for field_token in _query_tokens(field)
+        )
+    }
+    if not matched and _BROAD_COMPARISON_QUESTION.search(question) is not None:
+        return None
+    return matched
 
 
 def _comparison_scope_matches_question(
@@ -1827,6 +2196,40 @@ def _can_fallback_from_structured(question: str, *, plan: QueryPlan) -> bool:
     return (
         set(plan.intents) == {"aggregate"} and _EXPLICIT_COMPLETE_SCOPE.search(question) is None
     )
+
+
+def _structured_scalar_is_unambiguous(
+    analysis: StructuredAnalysisResult,
+    *,
+    question: str,
+) -> bool:
+    if (
+        analysis.status != "complete"
+        or analysis.tables_examined != 1
+        or analysis.matched_rows != 1
+        or len(analysis.claims) != 1
+        or "calculated " in analysis.message.casefold()
+    ):
+        return False
+    claim = analysis.claims[0]
+    if claim.value is None:
+        return False
+    meaningful_tokens = tuple(
+        token
+        for token in _query_tokens(question)
+        if token not in _VALUE_ANCHOR_QUERY_NOISE and token not in _COMPARISON_FIELD_NOISE
+    )
+    if not meaningful_tokens:
+        return False
+    evidence_text = "\n".join(
+        (
+            claim.text,
+            *(citation.exact_quote for citation in claim.citations),
+            *(citation.source_name for citation in claim.citations),
+        )
+    )
+    required_coverage = max(1, (len(meaningful_tokens) + 1) // 2)
+    return _token_coverage(evidence_text, tokens=meaningful_tokens) >= required_coverage
 
 
 def _source_state_message(context: QueryContext) -> str:
@@ -2298,7 +2701,8 @@ def _assignment_label_matches_query(
     if not label_tokens:
         return False
     return any(
-        _query_token_sequences_match(label_tokens, token_sequence)
+        len(token_sequence) <= len(label_tokens)
+        and _query_token_sequences_match(label_tokens[-len(token_sequence) :], token_sequence)
         for token_sequence in token_sequences
     )
 
@@ -2368,7 +2772,12 @@ def _query_assignment_token_sequences(
         if verb not in {"are", "did", "does", "has", "is", "was", "were"}:
             return ()
 
-    candidates: tuple[tuple[str, ...], ...] = _suffix_token_sequences(tokens)
+    contiguous = tuple(
+        tokens[start : start + width]
+        for width in range(min(4, len(tokens)), 1, -1)
+        for start in range(0, len(tokens) - width + 1)
+    )
+    candidates: tuple[tuple[str, ...], ...] = (*_suffix_token_sequences(tokens), *contiguous)
     if 1 < len(tokens) <= 4:
         # Terse field labels are commonly phrased in either order (for example,
         # "insured name" versus a source label of "Named insured").  Preserve
@@ -2798,9 +3207,14 @@ def _excerpt_span(
         narrowed_start = max(start, narrowed_end - excerpt_limit)
 
     if narrowed_start > start:
-        next_space = text.find(" ", narrowed_start, min(narrowed_start + 24, anchor_start))
-        if next_space >= 0:
-            narrowed_start = next_space + 1
+        sentence_boundary = text.rfind(". ", start, anchor_start)
+        if sentence_boundary >= start and anchor_end - (sentence_boundary + 2) <= excerpt_limit:
+            narrowed_start = sentence_boundary + 2
+            narrowed_end = min(end, narrowed_start + excerpt_limit)
+        else:
+            next_space = text.find(" ", narrowed_start, min(narrowed_start + 24, anchor_start))
+            if next_space >= 0:
+                narrowed_start = next_space + 1
     if narrowed_end < end:
         previous_space = text.rfind(" ", max(anchor_end, narrowed_end - 24), narrowed_end)
         if previous_space >= 0:

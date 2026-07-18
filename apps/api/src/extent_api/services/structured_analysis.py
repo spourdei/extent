@@ -672,17 +672,14 @@ def _column_score(header: str, question: str) -> int:
     meaningful = [token for token in header_tokens if token not in _QUESTION_STOPWORDS]
     if not meaningful:
         return 0
-    if meaningful[-1:] in (["id"], ["identifier"]) and len(meaningful) > 1:
-        entity_tokens = meaningful[:-1]
-        if all(
-            any(tokens_equivalent(token, candidate) for candidate in question_tokens)
-            for token in entity_tokens
-        ):
-            # Natural questions name the row entity ("claims", "locations")
-            # more often than its technical ``*_ID`` column.  Treat that noun as
-            # a weaker identity-column mention while preserving exact-header
-            # matches above.
-            return 2 + len(entity_tokens)
+    if (
+        len(header_tokens) >= 2
+        and header_tokens[-1] in {"id", "identifier"}
+        and any(tokens_equivalent(header_tokens[0], token) for token in question_tokens)
+    ):
+        # Natural questions often name the row entity ("claims", "locations")
+        # instead of its technical ``*_ID`` column.
+        return 12
     matched = sum(
         any(tokens_equivalent(token, candidate) for candidate in question_tokens)
         for token in meaningful
@@ -697,6 +694,11 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
         for mention_span in _condition_mentions(table, column, normalized):
             tail = normalized[mention_span[1] : mention_span[1] + 160]
             prefix = normalized[max(0, mention_span[0] - 60) : mention_span[0]]
+            if re.match(
+                r"\s+(?:is|are)\s+in\s+(?:each|every)\s+",
+                tail,
+            ):
+                continue
             if re.search(
                 r"\b(?:aggregate|average|avg|count|maximum|max|minimum|min|sum|total)\b",
                 normalized,
@@ -725,14 +727,16 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
                 break
             tail = re.sub(
                 r"^\s+(?:is|are)\s+(?=(?:above|after|at\s+(?:least|most)|before|below|"
-                r"greater|less|more|no\s+(?:earlier|later)|on\s+or|over|under)\b)",
+                r"exceed(?:s|ing)?|greater|less|more|no\s+(?:earlier|later)|"
+                r"on\s+or|over|under)\b)",
                 " ",
                 tail,
             )
             comparator = re.match(
                 r"\s*(?P<operator>>=|<=|!=|<>|=|>|<|on\s+or\s+after|"
                 r"on\s+or\s+before|no\s+earlier\s+than|no\s+later\s+than|"
-                r"is\s+not|not\s+equal\s+to|greater\s+than|more\s+than|over|"
+                r"is\s+not|not\s+equal\s+to|exceed(?:s|ing)?|greater\s+than|"
+                r"more\s+than|over|"
                 r"above|at\s+least|less\s+than|under|below|at\s+most|before|"
                 r"after|equals?|is|are)\s+"
                 r"(?P<value>[^?,;]+?)(?=\s+(?:and|by|grouped|per|where|with|"
@@ -790,7 +794,7 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
                 r"(?:(?:is|are)\s+)?"
                 r"(?P<operator>on\s+or\s+after|on\s+or\s+before|"
                 r"no\s+earlier\s+than|no\s+later\s+than|at\s+least|at\s+most|"
-                r"greater\s+than|more\s+than|less\s+than|after|before|over|"
+                r"exceed(?:s|ing)?|greater\s+than|more\s+than|less\s+than|after|before|over|"
                 r"under|above|below)\s+(?P<value>[^?,;]+?)"
                 r"(?=\s+(?:and|by|where|with|ordered|sorted|order|sort)\b|$)",
                 tail[comparator.end() :],
@@ -823,6 +827,12 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
             if not row.values[column].is_null
         }
         for raw_key, typed in distinct.items():
+            if raw_key in _AGGREGATE_WORDS and re.search(
+                r"\b(?:aggregate|average|avg|count|how\s+many|maximum|max|minimum|min|"
+                r"sum|total)\b",
+                normalized,
+            ):
+                continue
             value_matches = list(re.finditer(rf"(?<!\w){re.escape(raw_key)}(?!\w)", normalized))
             if len(raw_key) >= 2 and any(
                 not any(
@@ -1236,13 +1246,17 @@ def _list_or_summarize(
             if not rendered:
                 malformed += 1
                 continue
+            condition_columns = {condition.column for condition in conditions}
             value_column = next(
                 (
-                    condition.column
-                    for condition in conditions
-                    if condition.column in valid_columns
+                    column
+                    for column in identity
+                    if column in valid_columns and column not in condition_columns
                 ),
-                valid_columns[0],
+                next(
+                    (column for column in valid_columns if column not in condition_columns),
+                    valid_columns[0],
+                ),
             )
             value = row.values[value_column].raw or "null"
             claims.append(
@@ -1978,7 +1992,7 @@ def _condition_validation_error(
     comparison_count = len(
         re.findall(
             r"\b(?:on\s+or\s+after|on\s+or\s+before|no\s+earlier\s+than|"
-            r"no\s+later\s+than|at\s+least|at\s+most|greater\s+than|"
+            r"no\s+later\s+than|at\s+least|at\s+most|exceed(?:s|ing)?|greater\s+than|"
             r"more\s+than|less\s+than|after|before|over|under|above|below)\b",
             normalized,
         )
@@ -1990,7 +2004,7 @@ def _condition_validation_error(
             re.findall(
                 rf"\b(?:and|where|with)\s+{re.escape(header_key)}\s+"
                 r"(?!(?:(?:is|are)\s+)?(?:on\s+or|no\s+(?:earlier|later)|at\s+"
-                r"(?:least|most)|greater|more|less|after|before|over|under|"
+                r"(?:least|most)|exceed(?:s|ing)?|greater|more|less|after|before|over|under|"
                 r"above|below)\b)",
                 normalized,
             )
@@ -2404,7 +2418,17 @@ def _operator(value: str) -> Literal["eq", "ge", "gt", "le", "lt", "ne"]:
     normalized = " ".join(value.casefold().split())
     if normalized in {"!=", "<>", "is not", "not equal to"}:
         return "ne"
-    if normalized in {">", "greater than", "more than", "over", "above", "after"}:
+    if normalized in {
+        ">",
+        "exceed",
+        "exceeds",
+        "exceeding",
+        "greater than",
+        "more than",
+        "over",
+        "above",
+        "after",
+    }:
         return "gt"
     if normalized in {">=", "at least", "no earlier than", "on or after"}:
         return "ge"

@@ -21,11 +21,18 @@ from extent_api.services.publication import (
 from extent_api.token_forms import tokens_equivalent
 
 _WORD = re.compile(r"[a-z0-9]+")
+_MATERIAL_VALUE = re.compile(
+    r"(?:[$€£]|\b(?:USD|CAD|EUR|GBP)\b)\s*\d|\b\d+(?:\.\d+)?\s*%|"
+    r"\b(?=[A-Z0-9_/-]*[A-Z])(?=[A-Z0-9_/-]*\d)[A-Z][A-Z0-9]*(?:[-_/][A-Z0-9]+)+\b",
+    re.I,
+)
 _STOP_WORDS = frozenset(
     {
         "about",
         "and",
         "are",
+        "did",
+        "do",
         "does",
         "for",
         "from",
@@ -92,8 +99,19 @@ class ResilientDemoAnswerProvider:
         if not passages:
             return AnswerDraft(claims=[], summary="No matching sample evidence was found.")
         passage = max(passages, key=lambda candidate: _relevance(candidate, question=question))
+        question_tokens = _tokens(question)
+        evidence_tokens = _tokens(f"{passage.source_name} {passage.exact_quote}")
+        matched_tokens = _token_overlap(question_tokens, evidence_tokens)
+        minimum_matches = (
+            1 if len(question_tokens) <= 1 else max(2, len(question_tokens) * 2 // 3)
+        )
+        if _MATERIAL_VALUE.search(passage.exact_quote) is not None and matched_tokens >= 2:
+            minimum_matches = 2
+        if matched_tokens < minimum_matches:
+            return AnswerDraft(claims=[], summary="No matching sample evidence was found.")
         quote = passage.exact_quote.strip()
         claim_text = _extractive_claim_text(quote, question=question)
+        claim_text = claim_text if len(claim_text) <= 800 else claim_text[:797].rstrip() + "..."
         return AnswerDraft(
             claims=[
                 ClaimDraft(
@@ -121,7 +139,12 @@ def _relevance(passage: ModelPassage, *, question: str) -> tuple[int, int, int, 
     source_tokens = _tokens(passage.source_name)
     return (
         3 * _token_overlap(question_tokens, quote_tokens)
-        + _token_overlap(question_tokens, source_tokens),
+        + _token_overlap(question_tokens, source_tokens)
+        + int(
+            _token_overlap(question_tokens, quote_tokens) >= 2
+            and _MATERIAL_VALUE.search(passage.exact_quote) is not None
+        )
+        * 4,
         int("\t" in passage.exact_quote),
         int(bool(quote_tokens - question_tokens)),
         -len(passage.exact_quote),

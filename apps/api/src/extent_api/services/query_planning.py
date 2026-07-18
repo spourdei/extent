@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from extent_api.token_forms import is_likely_plural
+
 QueryMode = Literal["direct", "exhaustive", "mixed", "structured"]
 QueryIntent = Literal[
     "aggregate",
@@ -28,6 +30,10 @@ QueryIntent = Literal[
 
 _WORD = re.compile(r"[^\W_]+|\d+", re.UNICODE)
 _LIST = re.compile(r"\b(?:all|each|every|complete\s+list|list|enumerate|show\s+all)\b", re.I)
+_WHICH_SET = re.compile(
+    r"\bwhich\s+(?P<noun>[^\W\d_]+)\s+(?:are|have|were|with)\b",
+    re.I,
+)
 _AGGREGATE = re.compile(
     r"\b(?:average|avg|count|how\s+many|number\s+of|sum)\b",
     re.I,
@@ -51,42 +57,47 @@ _ORDER = re.compile(
     re.I,
 )
 _FILTER = re.compile(
-    r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
+    r"\b(?:above|after|at\s+(?:least|most)|before|below|except|excluding|"
+    r"exceed(?:s|ing)?|greater\s+than|less\s+than|more\s+than|"
     r"missing|not\s+equal|where|with(?:out)?)\b|"
     r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
     r"(?:<=|>=|!=|<>|<|>)",
     re.I,
 )
 _NON_WITH_FILTER = re.compile(
-    r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
+    r"\b(?:above|after|at\s+(?:least|most)|before|below|except|excluding|"
+    r"exceed(?:s|ing)?|greater\s+than|less\s+than|more\s+than|"
     r"missing|not\s+equal|where|without)\b|"
     r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
     r"(?:<=|>=|!=|<>|<|>)",
     re.I,
 )
 _EXCEPTIONS = re.compile(
-    r"\b(?:anomal(?:y|ies)|duplicate|exception|fail(?:s|ed|ing)?|missing|"
-    r"not\s+match(?:ed|ing)?|outlier|unmatched|violation)\b",
+    r"\b(?:absent|anomal(?:y|ies)|duplicate|exceptions?|fail(?:s|ed|ing)?|missing|"
+    r"not\s+(?:match(?:ed|ing)?|present)|outlier|unmatched|violation)\b",
     re.I,
 )
 _UNIVERSAL = re.compile(
     r"\b(?:does|do|did)\s+(?:all|each|every)\b|"
     r"\b(?:all|each|every)\b.{0,80}\b(?:have|match|meet|satisfy|contain|equal|"
     r"include|comply)\b|\bcompleteness\b|"
-    r"\b(?:is|are)\s+(?:the\s+)?(?:data|dataset|file|records?|rows?|sources?|tables?)\s+complete\b|"
+    r"\b(?:is|are)\s+(?:(?:the|all)\s+)?(?:data|dataset|file|records?|rows?|sources?|tables?)\s+complete\b|"
+    r"\b(?:is|are)\s+(?:the\s+)?(?:[^?\s]+\s+){1,4}(?:data|dataset|file|records?|rows?|sources?|tables?)\s+complete\b|"
     r"\b(?:data|dataset|file|records?|rows?|sources?|tables?)\s+(?:is|are)\s+complete\b",
     re.I,
 )
 _JOIN = re.compile(
-    r"\b(?:join|reconcile|cross[- ]?reference|unmatched|cardinality|"
+    r"\b(?:join|link|map|reconcile|cross[- ]?reference|unmatched|cardinality|"
     r"one[- ]to[- ]many|many[- ]to[- ]one)\b|"
     r"\bmatch\b.{0,120}\b(?:to|using|with)\b|"
-    r"\b(?:across|between|against)\b.{0,80}\b(?:files?|sources?|tables?|datasets?)\b",
+    r"\b(?:compare|cross[- ]?reference|match|reconcile)\b.{0,80}"
+    r"\b(?:across|between|against)\b.{0,80}\b(?:files?|sources?|tables?|datasets?)\b|"
+    r"\b(?:absent|missing|not\s+present)\b.{0,80}\b(?:files?|sources?|tables?|datasets?)\b",
     re.I,
 )
 _COMPARE = re.compile(
-    r"\b(?:compare|comparison|conflict|contradict|difference|disagree|"
-    r"inconsistent|mismatch|versus|vs\.?)\b",
+    r"\b(?:change(?:d|s)?|compare|comparison|consistent|conflict|contrast|contradict|"
+    r"difference|disagree|discrepanc(?:y|ies)|inconsistent|mismatch|versus|vs\.?)\b",
     re.I,
 )
 _COORDINATED_SCOPE = re.compile(
@@ -118,7 +129,10 @@ def plan_query(question: str) -> QueryPlan:
 
     normalized = " ".join(question.strip().split())
     intents: set[QueryIntent] = set()
-    if _LIST.search(normalized):
+    which_set = _WHICH_SET.search(normalized)
+    if _LIST.search(normalized) or (
+        which_set is not None and is_likely_plural(which_set.group("noun"))
+    ):
         intents.add("list")
     if (
         _AGGREGATE.search(normalized)
@@ -135,7 +149,6 @@ def plan_query(question: str) -> QueryPlan:
             _TOTAL.search(normalized)
             and (
                 _SET_NOUN.search(normalized)
-                or _LIST.search(normalized)
                 or re.search(
                     r"\b(?:by|per|across|where|for\s+each|of\s+all)\b", normalized, re.I
                 )
@@ -178,16 +191,13 @@ def plan_query(question: str) -> QueryPlan:
     complete_intents = {
         "aggregate",
         "completeness",
+        "filter",
         "group",
         "join",
         "list",
         "order",
     }
     requires_complete_data = bool(intents & complete_intents)
-    if "filter" in intents and (
-        intents & {"aggregate", "list"} or _SET_NOUN.search(normalized)
-    ):
-        requires_complete_data = True
     if "exceptions" in intents and (
         _SET_NOUN.search(normalized)
         or "list" in intents
