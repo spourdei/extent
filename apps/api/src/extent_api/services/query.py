@@ -474,10 +474,15 @@ class QueryService:
             ),
         )
         exhaustive_request = parse_exhaustive_request(execution_question)
-        if deterministic_plan.mode == "exhaustive" and isinstance(
-            deterministic_exhaustive_request, ExhaustiveRequest
-        ):
+        if deterministic_plan.requires_complete_data:
+            # Once the user's own wording unambiguously selects a complete-data
+            # capability, a model paraphrase must not invent an extra filter,
+            # join, grouping, or ordering clause.  Execute the recognized plan
+            # against the original question and keep model interpretation for
+            # genuinely ambiguous direct questions.
             query_plan = deterministic_plan
+            execution_question = normalized_question
+            exhaustive_request = deterministic_exhaustive_request
 
         if source_state_question or _SOURCE_STATE_QUESTION.search(execution_question):
             stored = self._repository.store_publication_result(
