@@ -32,7 +32,8 @@ _NULLS = {"", "-", "n/a", "na", "none", "null", "unknown"}
 _TRUE = {"true", "yes", "y"}
 _FALSE = {"false", "no", "n"}
 _NUMBER = re.compile(
-    r"^\s*(?P<prefix>[$€£])?\s*(?P<number>[+-]?(?:\d+(?:,\d{3})*|\d*)(?:\.\d+)?)"
+    r"^\s*(?P<prefix>[$€£]|USD|CAD|EUR|GBP)?\s*"
+    r"(?P<number>[+-]?(?:\d+(?:[,\s]\d{3})*|\d*)(?:\.\d+)?)"
     r"\s*(?P<suffix>%|USD|CAD|EUR|GBP)?\s*$",
     re.I,
 )
@@ -88,6 +89,11 @@ _AGGREGATE_WORDS = {
     "sum",
     "total",
 }
+_EXTREMA_ENTITY_QUESTION = re.compile(
+    r"\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b.{0,40}"
+    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -341,7 +347,7 @@ def parse_typed_value(raw: str) -> TypedValue:
     number = _NUMBER.fullmatch(value)
     if number is not None and number.group("number") not in {"", "+", "-", "."}:
         try:
-            decimal = Decimal(number.group("number").replace(",", ""))
+            decimal = Decimal(number.group("number").replace(",", "").replace(" ", ""))
         except InvalidOperation:
             pass
         else:
@@ -672,6 +678,17 @@ def _column_score(header: str, question: str) -> int:
     meaningful = [token for token in header_tokens if token not in _QUESTION_STOPWORDS]
     if not meaningful:
         return 0
+    if meaningful[-1:] in (["id"], ["identifier"]) and len(meaningful) > 1:
+        entity_tokens = meaningful[:-1]
+        if all(
+            any(tokens_equivalent(token, candidate) for candidate in question_tokens)
+            for token in entity_tokens
+        ):
+            # Natural questions name the row entity ("claims", "locations")
+            # more often than its technical ``*_ID`` column.  Treat that noun as
+            # a weaker identity-column mention while preserving exact-header
+            # matches above.
+            return 2 + len(entity_tokens)
     matched = sum(
         any(tokens_equivalent(token, candidate) for candidate in question_tokens)
         for token in meaningful
@@ -922,7 +939,7 @@ def _condition_matches(row: StructuredRow, condition: _Condition) -> bool:
 
 def _compare(left: TypedValue, right: TypedValue) -> int | None:
     if left.kind == right.kind == "number":
-        if left.unit != right.unit and right.unit is not None:
+        if left.unit is not None and right.unit is not None and left.unit != right.unit:
             return None
         assert isinstance(left.value, Decimal)
         assert isinstance(right.value, Decimal)
@@ -1093,6 +1110,18 @@ def _aggregate(
                 group_label = f" for {', '.join(parts)}"
             rendered = _render_decimal(value)
             rendered_with_unit = f"{rendered} {unit}" if unit else rendered
+            identity_prefix = ""
+            if (
+                metric.operation in {"maximum", "minimum"}
+                and len(contributor_rows) == 1
+                and _EXTREMA_ENTITY_QUESTION.search(question) is not None
+            ):
+                assert metric.column is not None
+                identity_prefix = _row_label(
+                    table,
+                    contributor_rows[0],
+                    excluded={metric.column},
+                )
             claims.append(
                 _claim(
                     citations=_representative_citations(
@@ -1101,7 +1130,7 @@ def _aggregate(
                     idempotency_key=idempotency_key,
                     index=len(claims),
                     run_id=run_id,
-                    text=f"{label}{group_label} is {rendered_with_unit}.",
+                    text=(f"{identity_prefix}{label}{group_label} is {rendered_with_unit}."),
                     value=rendered_with_unit,
                 )
             )
@@ -1392,6 +1421,8 @@ def _reconcile(
     left, right = tables[:2]
     if universal:
         left, right = _orient_universal_tables(left, right, question=question)
+    elif _join_projection_requested(question):
+        left, right = _orient_join_projection_tables(left, right, question=question)
     common = _common_columns(left, right)
     key_pair = _join_key(left, right, common=common, question=question)
     if key_pair is None:
@@ -1431,6 +1462,20 @@ def _reconcile(
                 unmatched_right_keys=unmatched_right,
             ),
         )
+    if not universal and _join_projection_requested(question):
+        projected = _project_join_rows(
+            left,
+            right,
+            idempotency_key=idempotency_key,
+            left_groups=left_groups,
+            left_key=left_key,
+            question=question,
+            right_groups=right_groups,
+            right_key=right_key,
+            run_id=run_id,
+        )
+        if projected is not None:
+            return projected
     if universal:
         success = not unmatched_left
         right_only = len(unmatched_right)
@@ -1574,6 +1619,152 @@ def _reconcile(
         matched_rows=len(matched),
         message=message,
         reconciliation=reconciliation,
+        status="complete",
+        tables_examined=2,
+    )
+
+
+def _join_projection_requested(question: str) -> bool:
+    return (
+        re.search(
+            r"\b(?:match|map)\s+(?:all|each|every)\b|"
+            r"\b(?:list|show)\b.{0,80}\b(?:from|join|match|using|with)\b",
+            question,
+            re.I,
+        )
+        is not None
+    )
+
+
+def _orient_join_projection_tables(
+    left: StructuredTable,
+    right: StructuredTable,
+    *,
+    question: str,
+) -> tuple[StructuredTable, StructuredTable]:
+    match = re.search(
+        r"\b(?:match|map|list|show)\s+(?:all|each|every)\s+"
+        r"(?P<target>.+?)\s+(?:from|to|using|with)\b",
+        question,
+        re.I,
+    )
+    if match is None:
+        return left, right
+    target = match.group("target")
+    left_score = _table_score(left, target)
+    right_score = _table_score(right, target)
+    return (right, left) if right_score > left_score else (left, right)
+
+
+def _project_join_rows(
+    left: StructuredTable,
+    right: StructuredTable,
+    *,
+    idempotency_key: str,
+    left_groups: dict[str, list[StructuredRow]],
+    left_key: int,
+    question: str,
+    right_groups: dict[str, list[StructuredRow]],
+    right_key: int,
+    run_id: UUID,
+) -> StructuredAnalysisResult | None:
+    left_columns = [
+        column for column in _mentioned_columns(left, question) if column != left_key
+    ]
+    right_columns = [
+        column for column in _mentioned_columns(right, question) if column != right_key
+    ]
+    if not left_columns and not right_columns:
+        return None
+
+    left_identity = _identity_columns(left, list(left.rows))
+    if left_identity and left_identity[0] != left_key:
+        left_columns = list(dict.fromkeys([left_identity[0], *left_columns]))
+    if len(left.rows) > EXHAUSTIVE_EXTRACTION_CLAIM_LIMIT:
+        return _analysis_failure(
+            (left, right),
+            examined=len(left.rows) + len(right.rows),
+            malformed=0,
+            message=(
+                "Complete join projection found more rows than the bounded response "
+                "can publish; narrow the requested rows."
+            ),
+        )
+
+    claims: list[ClaimRecord] = []
+    audits: list[RowAudit] = []
+    matched_rows = 0
+    for left_row in left.rows:
+        key = left_row.values[left_key].raw
+        matches = right_groups.get(key, [])
+        if len(matches) > 1:
+            return _analysis_failure(
+                (left, right),
+                examined=len(left.rows) + len(right.rows),
+                malformed=0,
+                message=(
+                    "Join projection found multiple right-side rows for one requested "
+                    "key, so the projected value is ambiguous."
+                ),
+            )
+        rendered = [
+            f"{left.headers[column]}: {left_row.values[column].raw or 'null'}"
+            for column in left_columns
+        ]
+        citations: tuple[PassageRecord, ...]
+        if not matches:
+            rendered.append(
+                f"No matching row in {right.source_name} for "
+                f"{left.headers[left_key]} {left_row.values[left_key].raw}."
+            )
+            citations = (left_row.citation,)
+            value = "unmatched"
+        else:
+            right_row = matches[0]
+            rendered.extend(
+                f"{right.headers[column]}: {right_row.values[column].raw or 'null'}"
+                for column in right_columns
+            )
+            citations = (left_row.citation, right_row.citation)
+            value_column = right_columns[0] if right_columns else left_columns[0]
+            value = (
+                right_row.values[value_column].raw
+                if right_columns
+                else left_row.values[value_column].raw
+            ) or "null"
+            matched_rows += 1
+            audits.extend(_audits([right_row], operation="join"))
+        claims.append(
+            _claim(
+                citations=citations,
+                idempotency_key=idempotency_key,
+                index=len(claims),
+                run_id=run_id,
+                text="; ".join(rendered).rstrip(".") + ".",
+                value=value,
+            )
+        )
+        audits.extend(_audits([left_row], operation="join"))
+
+    return StructuredAnalysisResult(
+        audits=tuple(audits),
+        claims=tuple(claims),
+        examined_rows=len(left.rows) + len(right.rows),
+        malformed_rows=0,
+        matched_rows=matched_rows,
+        message=_bounded_message(
+            f"Joined {len(left.rows)} requested row(s) from {left.source_name} to "
+            f"{right.source_name}; {matched_rows} matched and "
+            f"{len(left.rows) - matched_rows} were unmatched."
+        ),
+        reconciliation=ReconciliationAudit(
+            duplicate_key_count=sum(len(rows) > 1 for rows in left_groups.values()),
+            left_rows=len(left.rows),
+            matched_keys=len(set(left_groups) & set(right_groups)),
+            right_rows=len(right.rows),
+            unmatched_left_keys=tuple(sorted(set(left_groups) - set(right_groups))),
+            unmatched_right_keys=tuple(sorted(set(right_groups) - set(left_groups))),
+        ),
         status="complete",
         tables_examined=2,
     )
@@ -1746,7 +1937,12 @@ def _calculate(
         result = min(typed_decimals)
     else:
         result = max(typed_decimals)
-    return result, next(iter(units)), [row for row, _ in values]
+    contributor_rows = (
+        [row for row, value in values if value.value == result]
+        if operation in {"minimum", "maximum"}
+        else [row for row, _ in values]
+    )
+    return result, next(iter(units)), contributor_rows
 
 
 def _sum_column(rows: list[StructuredRow], column: int) -> tuple[Decimal, str | None] | None:
@@ -1757,8 +1953,8 @@ def _sum_column(rows: list[StructuredRow], column: int) -> tuple[Decimal, str | 
 def _aggregation_requested(question: str) -> bool:
     return (
         re.search(
-            r"\b(?:average|avg|break\s*down|count|how\s+many|maximum|max|mean|"
-            r"minimum|min|number\s+of|sum|total)\b",
+            r"\b(?:average|avg|break\s*down|count|highest|how\s+many|largest|"
+            r"lowest|maximum|max|mean|minimum|min|number\s+of|smallest|sum|total)\b",
             question,
             re.I,
         )
@@ -1840,8 +2036,8 @@ def _condition_validation_error(
 def _requested_metric_operations(question: str) -> tuple[AggregateOperation, ...]:
     patterns: tuple[tuple[AggregateOperation, str], ...] = (
         ("average", r"\b(?:average|avg|mean)\b"),
-        ("minimum", r"\b(?:minimum|min|lowest)\b"),
-        ("maximum", r"\b(?:maximum|max|highest)\b"),
+        ("minimum", r"\b(?:lowest|minimum|min|smallest)\b"),
+        ("maximum", r"\b(?:highest|largest|maximum|max)\b"),
         ("sum", r"\b(?:sum|total)\b"),
     )
     return tuple(
@@ -1855,8 +2051,8 @@ def _metric_operation_mentions(
     normalized = _normalized_text(question)
     patterns: tuple[tuple[AggregateOperation, str], ...] = (
         ("average", r"\b(?:average|avg|mean)\b"),
-        ("minimum", r"\b(?:minimum|min|lowest)\b"),
-        ("maximum", r"\b(?:maximum|max|highest)\b"),
+        ("minimum", r"\b(?:lowest|minimum|min|smallest)\b"),
+        ("maximum", r"\b(?:highest|largest|maximum|max)\b"),
         ("sum", r"\b(?:sum|total)\b"),
     )
     return sorted(
@@ -2266,7 +2462,16 @@ def _parse_date(value: str) -> date | None:
 def _unit(prefix: str | None, suffix: str | None) -> str | None:
     if suffix:
         return suffix.upper()
-    return {"$": "USD", "€": "EUR", "£": "GBP"}.get(prefix or "")
+    normalized_prefix = (prefix or "").upper()
+    return {
+        "$": "USD",
+        "€": "EUR",
+        "£": "GBP",
+        "USD": "USD",
+        "CAD": "CAD",
+        "EUR": "EUR",
+        "GBP": "GBP",
+    }.get(normalized_prefix)
 
 
 def _render_decimal(value: Decimal) -> str:

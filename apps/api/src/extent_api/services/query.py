@@ -238,6 +238,29 @@ _COMPARISON_FIELD_NOISE = {
     "versus",
     "vs",
 }
+_NON_EVIDENTIARY_REQUEST = re.compile(
+    r"\b(?:forecast|predict|recommend)\b|"
+    r"\bshould\b.{0,80}\b(?:choose|select|buy)\b|"
+    r"\blegally\s+(?:adequate|sufficient)\b|"
+    r"\bguarantee\b.{0,80}\bfuture\b|"
+    r"\b(?:ignore|disregard)\b.{0,40}\b(?:documents?|evidence|files?|sources?)\b|"
+    r"\binvent\b|"
+    r"\bwhat\s+will\s+(?:the\s+)?next\b|"
+    r"\bwrite\b.{0,40}\b(?:email|letter|message)\b",
+    re.IGNORECASE,
+)
+_SOURCED_NON_FACTUAL_REQUEST = re.compile(
+    r"\b(?:forecast|prediction|recommendation)\b.{0,80}"
+    r"\b(?:documented|in\s+the\s+(?:file|source)|recorded|stated)\b|"
+    r"\b(?:documented|recorded|stated)\b.{0,80}"
+    r"\b(?:forecast|prediction|recommendation)\b",
+    re.IGNORECASE,
+)
+_TERSE_ANALYTICAL_REQUEST = re.compile(
+    r"\b(?:all|average|avg|compare|count|difference|every|filter|group|join|"
+    r"list|maximum|minimum|predict|reconcile|sort|sum|summari[sz]e|total)\b",
+    re.IGNORECASE,
+)
 _STRUCTURED_VALUE_QUESTION = re.compile(
     r"^\s*(?:(?:what\b|what(?:'s|s|\s+(?:is|are|was|were))|"
     r"what\b.{1,60}\b(?:is|are|was|were)\s+"
@@ -464,6 +487,21 @@ class QueryService:
                 now=now,
                 passages=(),
                 policy_version=SOURCE_STATE_POLICY_VERSION,
+                question=normalized_question,
+                status="insufficient",
+            )
+            return project_question_result(stored)
+        if _is_non_evidentiary_request(normalized_question):
+            stored = self._repository.store_publication_result(
+                claims=(),
+                context=context,
+                idempotency_key=idempotency_key,
+                message=(
+                    "Extent answers factual questions supported by the files; it cannot "
+                    "predict, recommend, invent, or replace source evidence."
+                ),
+                now=now,
+                passages=(),
                 question=normalized_question,
                 status="insufficient",
             )
@@ -2495,7 +2533,17 @@ def _question_requests_multiple_facts(question: str) -> bool:
 
 
 def _question_prefers_structured_value(question: str) -> bool:
-    return _STRUCTURED_VALUE_QUESTION.search(question) is not None
+    if _STRUCTURED_VALUE_QUESTION.search(question) is not None:
+        return True
+    tokens = _query_tokens(question)
+    return 1 <= len(tokens) <= 4 and _TERSE_ANALYTICAL_REQUEST.search(question) is None
+
+
+def _is_non_evidentiary_request(question: str) -> bool:
+    return (
+        _NON_EVIDENTIARY_REQUEST.search(question) is not None
+        and _SOURCED_NON_FACTUAL_REQUEST.search(question) is None
+    )
 
 
 def _distinct_currency_values(
@@ -2555,7 +2603,7 @@ def _material_value_anchor(
         if boundary is not None:
             label_window_end = token_end + boundary.start()
         separator = re.search(
-            r"(?P<strong>:|=|\s[\u2013\u2014-]\s)|"
+            r"(?P<strong>\t+|:|=|\s[\u2013\u2014-]\s)|"
             r"(?P<copula>\s+(?:is|are|was|were)\s+)",
             text[token_end:label_window_end],
             re.IGNORECASE,
@@ -2712,6 +2760,11 @@ def _query_assignment_token_sequences(
         for start in range(0, len(tokens) - width + 1)
     )
     candidates: tuple[tuple[str, ...], ...] = (*_suffix_token_sequences(tokens), *contiguous)
+    if 1 < len(tokens) <= 4:
+        # Terse field labels are commonly phrased in either order (for example,
+        # "insured name" versus a source label of "Named insured").  Preserve
+        # both bounded orders without expanding into a combinatorial synonym set.
+        candidates = (*candidates, tuple(reversed(tokens)))
     scope_matches = list(_FIELD_SCOPE_PREPOSITION.finditer(question))
     non_of_scopes = [scope for scope in scope_matches if scope.group(0).casefold() != "of"]
     for scope in (*non_of_scopes, *scope_matches):
@@ -2786,6 +2839,17 @@ def _select_passages(
         )
         for candidate in candidates
     }
+    material_coverage_by_block = {
+        candidate.block_id: (
+            _token_coverage(
+                candidate.text[anchor[0] : anchor[1]],
+                tokens=tokens,
+            )
+            if (anchor := material_by_block[candidate.block_id]) is not None
+            else 0
+        )
+        for candidate in candidates
+    }
     has_material_evidence = prefer_value_evidence and any(
         anchor is not None for anchor in material_by_block.values()
     )
@@ -2801,6 +2865,7 @@ def _select_passages(
             int(prefer_value_evidence and material_by_block[item[1].block_id] is not None),
             source_coverage_by_block[item[1].block_id] if broad_comparison else 0,
             coverage_by_block[item[1].block_id],
+            material_coverage_by_block[item[1].block_id],
             -item[0],
         ),
         reverse=True,

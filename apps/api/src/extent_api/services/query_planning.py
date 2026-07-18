@@ -38,7 +38,15 @@ _AGGREGATE = re.compile(
     r"\b(?:average|avg|count|how\s+many|number\s+of|sum)\b",
     re.I,
 )
-_EXTREMA = re.compile(r"\b(?:maximum|max|minimum|min)\b", re.I)
+_EXTREMA = re.compile(
+    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    re.I,
+)
+_EXTREMA_ENTITY = re.compile(
+    r"\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b.{0,40}"
+    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    re.I,
+)
 _TOTAL = re.compile(r"\b(?:aggregate|total)\b", re.I)
 _SET_NOUN = re.compile(r"\b(?:dataset|file|record|row|source|table)s?\b", re.I)
 _GROUP = re.compile(r"\b(?:break\s*down|for\s+each|group(?:ed)?|per)\b|\bby\b", re.I)
@@ -51,6 +59,13 @@ _ORDER = re.compile(
 _FILTER = re.compile(
     r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
     r"missing|not\s+equal|where|with(?:out)?)\b|"
+    r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
+    r"(?:<=|>=|!=|<>|<|>)",
+    re.I,
+)
+_NON_WITH_FILTER = re.compile(
+    r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
+    r"missing|not\s+equal|where|without)\b|"
     r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
     r"(?:<=|>=|!=|<>|<|>)",
     re.I,
@@ -72,6 +87,7 @@ _UNIVERSAL = re.compile(
 _JOIN = re.compile(
     r"\b(?:join|reconcile|cross[- ]?reference|unmatched|cardinality|"
     r"one[- ]to[- ]many|many[- ]to[- ]one)\b|"
+    r"\bmatch\b.{0,120}\b(?:to|using|with)\b|"
     r"\b(?:compare|cross[- ]?reference|match|reconcile)\b.{0,80}"
     r"\b(?:across|between|against)\b.{0,80}\b(?:files?|sources?|tables?|datasets?)\b|"
     r"\b(?:absent|missing|not\s+present)\b.{0,80}\b(?:files?|sources?|tables?|datasets?)\b",
@@ -123,6 +139,7 @@ def plan_query(question: str) -> QueryPlan:
             and (
                 _SET_NOUN.search(normalized)
                 or _LIST.search(normalized)
+                or _EXTREMA_ENTITY.search(normalized)
                 or re.search(r"\b(?:across|among|of\s+all)\b", normalized, re.I)
             )
         )
@@ -146,13 +163,16 @@ def plan_query(question: str) -> QueryPlan:
         intents.add("group")
     elif _GROUP.search(grouping_text) and "aggregate" in intents:
         intents.add("group")
-    if _FILTER.search(normalized):
+    join_requested = _JOIN.search(normalized) is not None
+    if _FILTER.search(normalized) and (
+        not join_requested or _NON_WITH_FILTER.search(normalized)
+    ):
         intents.add("filter")
     if _EXCEPTIONS.search(normalized):
         intents.add("exceptions")
     if _UNIVERSAL.search(normalized):
         intents.add("completeness")
-    if _JOIN.search(normalized):
+    if join_requested:
         intents.add("join")
     if _COMPARE.search(normalized) or (
         _COORDINATED_SCOPE.search(normalized)
