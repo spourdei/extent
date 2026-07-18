@@ -90,8 +90,9 @@ _AGGREGATE_WORDS = {
     "total",
 }
 _EXTREMA_ENTITY_QUESTION = re.compile(
-    r"\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b.{0,40}"
-    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    r"(?:\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b|"
+    r"\b(?:identify|find|give|name|return|show)\b.{0,100})"
+    r".{0,40}\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
     re.I,
 )
 
@@ -1620,7 +1621,7 @@ def _reconcile(
 def _join_projection_requested(question: str) -> bool:
     return (
         re.search(
-            r"\b(?:match|map)\s+(?:all|each|every)\b|"
+            r"\b(?:join|match|map)\s+(?:all|each|every)\b|"
             r"\b(?:list|show)\b.{0,80}\b(?:from|join|match|using|with)\b",
             question,
             re.I,
@@ -1636,7 +1637,7 @@ def _orient_join_projection_tables(
     question: str,
 ) -> tuple[StructuredTable, StructuredTable]:
     match = re.search(
-        r"\b(?:match|map|list|show)\s+(?:all|each|every)\s+"
+        r"\b(?:join|match|map|list|show)\s+(?:all|each|every)\s+"
         r"(?P<target>.+?)\s+(?:from|to|using|with)\b",
         question,
         re.I,

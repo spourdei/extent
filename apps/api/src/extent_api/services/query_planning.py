@@ -43,8 +43,9 @@ _EXTREMA = re.compile(
     re.I,
 )
 _EXTREMA_ENTITY = re.compile(
-    r"\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b.{0,40}"
-    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    r"(?:\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b|"
+    r"\b(?:identify|find|give|name|return|show)\b.{0,100})"
+    r".{0,40}\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
     re.I,
 )
 _TOTAL = re.compile(r"\b(?:aggregate|total)\b", re.I)
@@ -166,8 +167,15 @@ def plan_query(question: str) -> QueryPlan:
     elif _GROUP.search(grouping_text) and "aggregate" in intents:
         intents.add("group")
     join_requested = _JOIN.search(normalized) is not None
-    if _FILTER.search(normalized) and (
-        not join_requested or _NON_WITH_FILTER.search(normalized)
+    if (
+        _FILTER.search(normalized)
+        and (not join_requested or _NON_WITH_FILTER.search(normalized))
+        and re.search(
+            r"\bwith\b.{0,60}\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+            normalized,
+            re.I,
+        )
+        is None
     ):
         intents.add("filter")
     if _EXCEPTIONS.search(normalized):

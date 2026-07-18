@@ -27,7 +27,7 @@ _EXHAUSTIVE_QUANTIFIER = (
 )
 _REQUEST_PATTERNS = (
     re.compile(
-        _COMMAND_PREFIX + r"(?:extract|list|show|find|return|collect)\s+"
+        _COMMAND_PREFIX + r"(?:collect|enumerate|extract|find|get|give|list|return|show)\s+"
         r"(?:me\s+)?(?:a\s+list\s+of\s+)?" + _EXHAUSTIVE_QUANTIFIER + r"\s+"
         r"(?P<target>.+)$",
         re.I,
@@ -215,7 +215,14 @@ def parse_exhaustive_request(question: str) -> ExhaustiveRequestDecision:
         )
 
     display_words = [match.group(0) for match in _WORD.finditer(target)]
-    while display_words and display_words[0].casefold() in {"a", "an", "single", "the"}:
+    while display_words and display_words[0].casefold() in {
+        "a",
+        "an",
+        "distinct",
+        "single",
+        "the",
+        "unique",
+    }:
         display_words.pop(0)
     normalized_tokens = [
         unicodedata.normalize("NFKC", word).casefold() for word in display_words
