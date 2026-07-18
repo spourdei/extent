@@ -317,7 +317,8 @@ rules.
 | DOCX                  | Body paragraphs and tables, with `document.xml` capped at 20,000,000 bytes |
 | XLSX                  | Up to 20 sheets, 10,000 rows per sheet, and 200 columns                    |
 | Complete-list results | Up to 200 distinct rows before a visible overflow failure                  |
-| Questions             | 12 authenticated attempts per user per UTC minute by default               |
+| Authenticated queries | 12 attempts per user per UTC minute by default                             |
+| Public demo queries   | 12 per visitor and 60 total per UTC minute                                 |
 | Worker attempts       | Initial execution plus 2 retries                                           |
 
 Unsupported, inaccessible, malformed, encrypted, or capped files remain visible. If some files
