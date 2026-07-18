@@ -71,7 +71,10 @@ _WORD = re.compile(r"[^\W_]+|\d+", re.UNICODE)
 _LINE = re.compile(r"[^\n]+")
 _STRONG_SEPARATOR = re.compile(r"\s*(?P<separator>:|=|\s[\u2013\u2014]\s|\s-\s)\s*")
 _COPULA_SEPARATOR = re.compile(r"\s+\b(?:is|are|was|were)\b\s+", re.I)
-_CLAUSE_BOUNDARY = re.compile(r"[;|]")
+_CLAUSE_BOUNDARY = re.compile(
+    r"[;|]|\band\s+separately\b|(?<=[A-Za-z0-9])\.(?=\s+[A-Z])",
+    re.I,
+)
 _PERIOD_COPULAR_PAIR = re.compile(r"\.\s+[^.;|\n]{1,80}?\s+(?:is|are|was|were)\s+", re.I)
 _MONEY_LITERAL = re.compile(
     r"(?:(?P<prefix_sign>[+-]?)\s*(?P<prefix>[$€£]|(?:USD|CAD|EUR|GBP)\b)\s*"
@@ -217,7 +220,7 @@ def parse_exhaustive_request(question: str) -> ExhaustiveRequestDecision:
     normalized_tokens = [
         unicodedata.normalize("NFKC", word).casefold() for word in display_words
     ]
-    while (
+    if (
         not explicitly_quoted
         and normalized_tokens
         and normalized_tokens[-1] in _GENERIC_TAIL_TOKENS
@@ -260,55 +263,72 @@ def extract_values(
     grouped: dict[tuple[str, ValueKind, str], _GroupedValue] = {}
     occurrence_count = 0
     ambiguous_count = 0
+    blocks_by_source: dict[UUID, list[RetrievedBlock]] = {}
     for block in blocks:
-        candidates, block_ambiguous = _block_candidates(block.text, request=request)
+        blocks_by_source.setdefault(block.source_file_id, []).append(block)
+    metadata_sources = {
+        source_file_id
+        for source_file_id, source_blocks in blocks_by_source.items()
+        if any(isinstance(block.structured_metadata, dict) for block in source_blocks)
+    }
+    candidate_stream: list[tuple[RetrievedBlock, _Candidate]] = []
+    for block in blocks:
+        candidates, block_ambiguous = _block_candidates(
+            block.text,
+            ignore_table_lines=block.source_file_id in metadata_sources,
+            request=request,
+        )
         ambiguous_count += block_ambiguous
-        for candidate in candidates:
-            quote = block.text[candidate.quote_start : candidate.quote_end]
-            if not quote or len(quote) > _MAX_QUOTE_CHARS or candidate.raw_value not in quote:
-                ambiguous_count += 1
-                continue
-            key = (
-                _normalized_label(candidate.label),
-                candidate.kind,
-                candidate.normalized_value,
+        candidate_stream.extend((block, candidate) for candidate in candidates)
+    for source_blocks in blocks_by_source.values():
+        candidate_stream.extend(_metadata_candidates(source_blocks, request=request))
+
+    for block, candidate in candidate_stream:
+        quote = block.text[candidate.quote_start : candidate.quote_end]
+        if not quote or len(quote) > _MAX_QUOTE_CHARS or candidate.raw_value not in quote:
+            ambiguous_count += 1
+            continue
+        key = (
+            _normalized_label(candidate.label),
+            candidate.kind,
+            candidate.normalized_value,
+        )
+        occurrence_count += 1
+        group = grouped.get(key)
+        if group is None:
+            group = _GroupedValue(
+                kind=candidate.kind,
+                label=candidate.label,
+                normalized_value=candidate.normalized_value,
+                raw_value=candidate.raw_value,
             )
-            occurrence_count += 1
-            group = grouped.get(key)
-            if group is None:
-                group = _GroupedValue(
-                    kind=candidate.kind,
-                    label=candidate.label,
-                    normalized_value=candidate.normalized_value,
-                    raw_value=candidate.raw_value,
-                )
-                grouped[key] = group
-            if block.source_file_id in group.source_file_ids or len(group.citations) >= 2:
-                continue
-            group.source_file_ids.add(block.source_file_id)
+            grouped[key] = group
+        if block.source_file_id in group.source_file_ids or len(group.citations) >= 2:
+            continue
+        group.source_file_ids.add(block.source_file_id)
+        group.citations.append(
+            _passage_for_span(
+                block,
+                end=candidate.quote_end,
+                normalized_value=candidate.normalized_value,
+                raw_value=candidate.raw_value,
+                start=candidate.quote_start,
+            )
+        )
+        if (
+            candidate.context_quote_start is not None
+            and candidate.context_quote_end is not None
+            and len(group.citations) < 2
+        ):
             group.citations.append(
                 _passage_for_span(
                     block,
-                    end=candidate.quote_end,
-                    normalized_value=candidate.normalized_value,
-                    raw_value=candidate.raw_value,
-                    start=candidate.quote_start,
+                    end=candidate.context_quote_end,
+                    normalized_value=None,
+                    raw_value=None,
+                    start=candidate.context_quote_start,
                 )
             )
-            if (
-                candidate.context_quote_start is not None
-                and candidate.context_quote_end is not None
-                and len(group.citations) < 2
-            ):
-                group.citations.append(
-                    _passage_for_span(
-                        block,
-                        end=candidate.context_quote_end,
-                        normalized_value=None,
-                        raw_value=None,
-                        start=candidate.context_quote_start,
-                    )
-                )
 
     unique_count = len(grouped)
     if unique_count > EXHAUSTIVE_EXTRACTION_CLAIM_LIMIT:
@@ -371,7 +391,9 @@ def _passage_for_span(
     )
 
 
-def _block_candidates(text: str, *, request: ExhaustiveRequest) -> tuple[list[_Candidate], int]:
+def _block_candidates(
+    text: str, *, ignore_table_lines: bool = False, request: ExhaustiveRequest
+) -> tuple[list[_Candidate], int]:
     lines = [
         _LineSpan(start=match.start(), end=match.end(), text=match.group(0))
         for match in _LINE.finditer(text)
@@ -379,23 +401,37 @@ def _block_candidates(text: str, *, request: ExhaustiveRequest) -> tuple[list[_C
     candidates: list[_Candidate] = []
     resolved_lines: set[int] = set()
 
-    table_candidates, table_lines, table_headers = _column_table_candidates(
-        lines, request=request
+    table_candidates, table_lines, table_headers = (
+        ([], set(), set())
+        if ignore_table_lines
+        else _column_table_candidates(lines, request=request)
     )
     candidates.extend(table_candidates)
     resolved_lines.update(table_lines)
+    vertical_candidates, vertical_lines, vertical_headers = _vertical_table_candidates(
+        lines, request=request
+    )
+    candidates.extend(vertical_candidates)
+    resolved_lines.update(vertical_lines)
+    table_headers.update(vertical_headers)
 
     for index, line in enumerate(lines):
-        if index in table_headers:
+        if index in table_headers or (ignore_table_lines and _split_table_row(line.text)):
             continue
         line_candidates = _line_candidates(line, request=request)
         if line_candidates:
             candidates.extend(line_candidates)
-            if len(line_candidates) >= len(_target_spans(line.text, request=request)):
+            if len(line_candidates) >= _direct_value_structure_count(
+                line.text, request=request
+            ):
                 resolved_lines.add(index)
 
     for index, line in enumerate(lines[:-1]):
-        if index in resolved_lines or not _is_target_only(line.text, request=request):
+        if (
+            index in resolved_lines
+            or (ignore_table_lines and _split_table_row(line.text))
+            or not _is_target_only(line.text, request=request)
+        ):
             continue
         next_index = index + 1
         while next_index < len(lines) and not lines[next_index].text.strip():
@@ -403,7 +439,9 @@ def _block_candidates(text: str, *, request: ExhaustiveRequest) -> tuple[list[_C
         if next_index >= len(lines):
             continue
         following = lines[next_index]
-        value = _value_from_segment(following.text, allow_opaque=False)
+        value = _value_from_segment(following.text, allow_opaque=True)
+        if value is None:
+            value = _explicit_opaque_value(following.text)
         if value is None or _contains_target(following.text, request=request):
             continue
         label = _clean_label(line.text)
@@ -423,10 +461,274 @@ def _block_candidates(text: str, *, request: ExhaustiveRequest) -> tuple[list[_C
 
     ambiguous_count = sum(
         index not in resolved_lines
+        and not (ignore_table_lines and _split_table_row(line.text))
         and _line_has_unresolved_value_structure(line.text, request=request)
         for index, line in enumerate(lines)
     )
     return _deduplicate_candidates(candidates), ambiguous_count
+
+
+def _explicit_opaque_value(value: str) -> _TypedValue | None:
+    start, end = _trimmed_span(value, 0, len(value))
+    if end <= start or "\n" in value:
+        return None
+    raw = value[start:end].rstrip(" \t.,")
+    if (
+        not raw
+        or len(raw) > _MAX_VALUE_CHARS
+        or not any(character.isalnum() for character in raw)
+    ):
+        return None
+    normalized = _normalized_opaque(raw)
+    return _TypedValue(
+        end=start + len(raw),
+        kind="text",
+        normalized_value=normalized,
+        raw_value=raw,
+        start=start,
+    )
+
+
+def _vertical_table_candidates(
+    lines: list[_LineSpan], *, request: ExhaustiveRequest
+) -> tuple[list[_Candidate], set[int], set[int]]:
+    candidates: list[_Candidate] = []
+    resolved_lines: set[int] = set()
+    header_lines: set[int] = set()
+    for header_index, header in enumerate(lines[:-2]):
+        if (
+            not _label_matches_target(header.text, request=request)
+            or _typed_values(header.text)
+            or _split_table_row(header.text) is not None
+        ):
+            continue
+        pairs: list[tuple[int, _LineSpan, _LineSpan, _TypedValue]] = []
+        cursor = header_index + 1
+        while cursor + 1 < len(lines):
+            label_line = lines[cursor]
+            value_line = lines[cursor + 1]
+            if (
+                _split_table_row(label_line.text) is not None
+                or _split_table_row(value_line.text) is not None
+            ):
+                break
+            label = _clean_label(label_line.text)
+            value = _value_from_segment(value_line.text, allow_opaque=False)
+            if label is None or value is None or _typed_values(label_line.text):
+                break
+            pairs.append((cursor, label_line, value_line, value))
+            cursor += 2
+        if len(pairs) < 2:
+            continue
+        header_label = _clean_label(header.text)
+        if header_label is None:
+            continue
+        header_lines.add(header_index)
+        resolved_lines.add(header_index)
+        for label_index, label_line, value_line, value in pairs:
+            label = _clean_label(f"{label_line.text} — {header_label}")
+            if label is None:
+                continue
+            candidates.append(
+                _Candidate(
+                    context_quote_end=header.end,
+                    context_quote_start=header.start,
+                    kind=value.kind,
+                    label=label,
+                    normalized_value=value.normalized_value,
+                    quote_end=value_line.end,
+                    quote_start=label_line.start,
+                    raw_value=value.raw_value,
+                )
+            )
+            if _contains_target(label_line.text, request=request):
+                resolved_lines.add(label_index)
+    return candidates, resolved_lines, header_lines
+
+
+def _metadata_candidates(
+    blocks: list[RetrievedBlock], *, request: ExhaustiveRequest
+) -> list[tuple[RetrievedBlock, _Candidate]]:
+    metadata = next(
+        (
+            block.structured_metadata
+            for block in blocks
+            if isinstance(block.structured_metadata, dict)
+        ),
+        None,
+    )
+    if not isinstance(metadata, dict):
+        return []
+    raw_tables = metadata.get("tables")
+    if not isinstance(raw_tables, list):
+        return []
+    candidates: list[tuple[RetrievedBlock, _Candidate]] = []
+    for raw_table in raw_tables:
+        if not isinstance(raw_table, dict) or raw_table.get("complete") is not True:
+            continue
+        raw_headers = raw_table.get("headers")
+        raw_rows = raw_table.get("rows")
+        if not isinstance(raw_headers, list) or not isinstance(raw_rows, list):
+            continue
+        headers = [str(header) for header in raw_headers]
+        rows = [
+            [str(value) for value in raw_row.get("values", [])]
+            for raw_row in raw_rows
+            if isinstance(raw_row, dict) and isinstance(raw_row.get("values"), list)
+        ]
+        rows = [row for row in rows if len(row) == len(headers)]
+        if not rows:
+            continue
+        table_context = " ".join(
+            str(value) for value in (raw_table.get("title"), raw_table.get("section")) if value
+        )
+        target_columns = [
+            index
+            for index, header in enumerate(headers)
+            if _label_matches_target(header, request=request)
+            or _metadata_context_matches_target(table_context, header=header, request=request)
+        ]
+        if len(target_columns) == 1:
+            target_column = target_columns[0]
+            for row in rows:
+                context = row[0] if target_column > 0 else ""
+                label = _clean_label(
+                    f"{context} — {headers[target_column]}"
+                    if context
+                    else headers[target_column]
+                )
+                _append_metadata_candidate(
+                    candidates,
+                    blocks=blocks,
+                    label=label,
+                    row=row,
+                    value_column=target_column,
+                )
+
+        for row in rows:
+            for label_column, raw_label in enumerate(row[:-1]):
+                if not _label_matches_target(raw_label, request=request):
+                    continue
+                value_columns = _metadata_value_columns(
+                    headers,
+                    label_column=label_column,
+                    row=row,
+                )
+                for value_column in value_columns:
+                    label = _clean_label(f"{raw_label} — {headers[value_column]}")
+                    _append_metadata_candidate(
+                        candidates,
+                        blocks=blocks,
+                        label=label,
+                        row=row,
+                        value_column=value_column,
+                    )
+
+        generic_row_headers = {"control", "field", "item", "record", "subjectivity", "term"}
+        if (
+            len(request.target_tokens) == 1
+            and _normalized_label(headers[0]) not in generic_row_headers
+        ):
+            matching_rows = [
+                row for row in rows if _label_matches_target(row[0], request=request)
+            ]
+            typed_columns = {
+                column
+                for row in matching_rows
+                for column in _metadata_value_columns(
+                    headers,
+                    label_column=0,
+                    row=row,
+                )
+            }
+            if typed_columns and len(rows) >= 2:
+                for row in rows:
+                    for value_column in sorted(typed_columns):
+                        label = _clean_label(f"{row[0]} — {headers[value_column]}")
+                        _append_metadata_candidate(
+                            candidates,
+                            blocks=blocks,
+                            label=label,
+                            row=row,
+                            value_column=value_column,
+                            opaque=False,
+                        )
+    return candidates
+
+
+def _metadata_value_columns(
+    headers: list[str], *, label_column: int, row: list[str]
+) -> list[int]:
+    generic_labels = {"control", "field", "item", "record", "subjectivity", "term"}
+    generic_values = {
+        "position",
+        "quoted term",
+        "quoted value",
+        "recorded position",
+        "status",
+        "value",
+    }
+    if (
+        label_column == 0
+        and len(headers) > 1
+        and _normalized_label(headers[0]) in generic_labels
+        and _normalized_label(headers[1]) in generic_values
+    ):
+        return [1]
+    typed_columns = [
+        column
+        for column in range(label_column + 1, len(row))
+        if (value := _value_from_segment(row[column], allow_opaque=False)) is not None
+        and value.kind != "text"
+    ]
+    return typed_columns or [label_column + 1]
+
+
+def _metadata_context_matches_target(
+    context: str, *, header: str, request: ExhaustiveRequest
+) -> bool:
+    combined = _normalized_tokens(f"{context} {header}")
+    return all(
+        any(tokens_equivalent(target, token) for token in combined)
+        for target in request.target_tokens
+    )
+
+
+def _append_metadata_candidate(
+    candidates: list[tuple[RetrievedBlock, _Candidate]],
+    *,
+    blocks: list[RetrievedBlock],
+    label: str | None,
+    opaque: bool = True,
+    row: list[str],
+    value_column: int,
+) -> None:
+    if label is None or value_column >= len(row):
+        return
+    value = _value_from_segment(row[value_column], allow_opaque=opaque)
+    if value is None:
+        return
+    quote = "\t".join(row)
+    located = next(
+        ((block, start) for block in blocks if (start := block.text.find(quote)) >= 0),
+        None,
+    )
+    if located is None:
+        return
+    block, start = located
+    candidates.append(
+        (
+            block,
+            _Candidate(
+                kind=value.kind,
+                label=label,
+                normalized_value=value.normalized_value,
+                quote_end=start + len(quote),
+                quote_start=start,
+                raw_value=value.raw_value,
+            ),
+        )
+    )
 
 
 def _line_has_unresolved_value_structure(text: str, *, request: ExhaustiveRequest) -> bool:
@@ -434,7 +736,7 @@ def _line_has_unresolved_value_structure(text: str, *, request: ExhaustiveReques
 
     if not _contains_target(text, request=request):
         return False
-    if _typed_values(text) or _split_table_row(text) is not None:
+    if _split_table_row(text) is not None:
         return True
     if _is_target_only(text, request=request):
         return True
@@ -446,7 +748,40 @@ def _line_has_unresolved_value_structure(text: str, *, request: ExhaustiveReques
         copula = _COPULA_SEPARATOR.search(clause)
         if copula is not None and _is_target_only(clause[: copula.start()], request=request):
             return True
-    return False
+    return _direct_value_structure_count(text, request=request) > 0
+
+
+def _direct_value_structure_count(text: str, *, request: ExhaustiveRequest) -> int:
+    direct_values: set[tuple[int, int]] = set()
+    for clause_start, clause_end in _clause_segments(text):
+        clause = text[clause_start:clause_end]
+        values = _typed_values(clause)
+        for target_start, target_end in _target_spans(clause, request=request):
+            direct = [
+                value
+                for value in values
+                if _target_value_spans_are_direct(
+                    clause,
+                    target_span=(target_start, target_end),
+                    value_span=(value.start, value.end),
+                )
+            ]
+            if any(value.kind != "number" and value.start >= target_end for value in direct):
+                direct = [
+                    value
+                    for value in direct
+                    if not (value.kind == "number" and value.end <= target_start)
+                ]
+            for value in direct:
+                trailing = clause[value.end :]
+                if re.match(
+                    r"\s+(?:higher|lower|increase|decrease|difference)\b",
+                    trailing,
+                    re.I,
+                ):
+                    continue
+                direct_values.add((clause_start + value.start, clause_start + value.end))
+    return len(direct_values)
 
 
 def _column_table_candidates(
@@ -650,6 +985,12 @@ def _line_candidates(line: _LineSpan, *, request: ExhaustiveRequest) -> list[_Ca
         clause_start, clause_end = _clause_span(text, target_start, target_end)
         clause = text[clause_start:clause_end]
         typed_values = _typed_values(clause)
+        target_end_in_clause = target_end - clause_start
+        following_values = [
+            value for value in typed_values if value.start >= target_end_in_clause
+        ]
+        if len(following_values) == 1:
+            typed_values = following_values
         if len(typed_values) != 1:
             continue
         value = typed_values[0]
@@ -669,7 +1010,12 @@ def _line_candidates(line: _LineSpan, *, request: ExhaustiveRequest) -> list[_Ca
             unconsumed = text[absolute_value_span[1] : clause_end]
         else:
             unconsumed = text[clause_start : absolute_value_span[0]]
-        if _WORD.search(unconsumed) is not None:
+        trailing_context = (
+            target_end <= absolute_value_span[0]
+            and unconsumed.lstrip().startswith((",", "."))
+            and not _typed_values(unconsumed)
+        )
+        if _WORD.search(unconsumed) is not None and not trailing_context:
             continue
         label = _label_around_target(
             text,
@@ -752,6 +1098,19 @@ def _value_from_segment(value: str, *, allow_opaque: bool) -> _TypedValue | None
         return None
     segment = value[start:end]
     typed_values = _typed_values(segment)
+    if (
+        len(typed_values) == 1
+        and typed_values[0].start == 0
+        and segment[typed_values[0].end :].lstrip().startswith((",", "."))
+    ):
+        typed = typed_values[0]
+        return _TypedValue(
+            end=start + typed.end,
+            kind=typed.kind,
+            normalized_value=typed.normalized_value,
+            raw_value=typed.raw_value,
+            start=start + typed.start,
+        )
     if (
         len(typed_values) == 1
         and not segment[: typed_values[0].start].strip(" ~≈")
@@ -944,9 +1303,9 @@ def _label_around_target(
 ) -> str | None:
     clause_start, clause_end = clause_span
     if target_span[1] <= value_span[0]:
-        label_start, label_end = clause_start, value_span[0]
+        label_start, label_end = clause_start, target_span[1]
     else:
-        label_start, label_end = value_span[1], clause_end
+        label_start, label_end = target_span[0], clause_end
     label_text = text[label_start:label_end].strip(" \t:-=,.;")
     words = list(_WORD.finditer(label_text))
     if len(words) > _MAX_LABEL_WORDS:
@@ -978,11 +1337,21 @@ def _target_value_spans_are_direct(
         gap = text[value_span[1] : target_span[0]]
     else:
         return False
-    return len(gap) <= 16 and _WORD.search(gap) is None
+    if len(gap) > 16:
+        return False
+    words = tuple(match.group(0).casefold() for match in _WORD.finditer(gap))
+    return not words or set(words) <= {"are", "is", "of", "was", "were"}
 
 
 def _clean_label(label: str) -> str | None:
     cleaned = " ".join(label.strip(" \t:-=,.;|").split())
+    cleaned = re.sub(
+        r"^(?:(?:the\s+)?(?:document|file|source)\s+)?"
+        r"(?:lists?|reports?|shows?|states?|supports?)\s+",
+        "",
+        cleaned,
+        flags=re.I,
+    )
     if not cleaned or len(cleaned) > _MAX_LABEL_CHARS:
         return None
     return cleaned

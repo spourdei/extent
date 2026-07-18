@@ -20,11 +20,18 @@ from extent_api.services.publication import (
 )
 
 _WORD = re.compile(r"[a-z0-9]+")
+_MATERIAL_VALUE = re.compile(
+    r"(?:[$€£]|\b(?:USD|CAD|EUR|GBP)\b)\s*\d|\b\d+(?:\.\d+)?\s*%|"
+    r"\b(?=[A-Z0-9_/-]*[A-Z])(?=[A-Z0-9_/-]*\d)[A-Z][A-Z0-9]*(?:[-_/][A-Z0-9]+)+\b",
+    re.I,
+)
 _STOP_WORDS = frozenset(
     {
         "about",
         "and",
         "are",
+        "did",
+        "do",
         "does",
         "for",
         "from",
@@ -91,6 +98,22 @@ class ResilientDemoAnswerProvider:
         if not passages:
             return AnswerDraft(claims=[], summary="No matching sample evidence was found.")
         passage = max(passages, key=lambda candidate: _relevance(candidate, question=question))
+        question_tokens = _tokens(question)
+        evidence_tokens = _tokens(f"{passage.source_name} {passage.exact_quote}")
+        matched_tokens = question_tokens & evidence_tokens
+        contains_material_value = _MATERIAL_VALUE.search(passage.exact_quote) is not None
+        minimum_matches = (
+            1
+            if len(question_tokens) <= 1
+            else max(
+                2,
+                len(question_tokens) * 2 // 3,
+            )
+        )
+        if contains_material_value and len(matched_tokens) >= 2:
+            minimum_matches = 2
+        if len(matched_tokens) < minimum_matches:
+            return AnswerDraft(claims=[], summary="No matching sample evidence was found.")
         quote = passage.exact_quote.strip()
         return AnswerDraft(
             claims=[
@@ -106,7 +129,7 @@ class ResilientDemoAnswerProvider:
                         )
                     ],
                     relation="fact",
-                    text=quote,
+                    text=_bounded_claim_text(quote),
                 )
             ],
             summary="Answered directly from the best-matching prepared sample evidence.",
@@ -117,8 +140,12 @@ def _relevance(passage: ModelPassage, *, question: str) -> tuple[int, int]:
     question_tokens = _tokens(question)
     quote_tokens = _tokens(passage.exact_quote)
     source_tokens = _tokens(passage.source_name)
+    quote_matches = len(question_tokens & quote_tokens)
     return (
-        3 * len(question_tokens & quote_tokens) + len(question_tokens & source_tokens),
+        3 * quote_matches
+        + len(question_tokens & source_tokens)
+        + int(quote_matches >= 2 and _MATERIAL_VALUE.search(passage.exact_quote) is not None)
+        * 4,
         -len(passage.exact_quote),
     )
 
@@ -129,3 +156,8 @@ def _tokens(value: str) -> frozenset[str]:
         for token in _WORD.findall(value.casefold())
         if len(token) >= 3 and token not in _STOP_WORDS
     )
+
+
+def _bounded_claim_text(value: str) -> str:
+    normalized = " ".join(value.split())
+    return normalized if len(normalized) <= 800 else normalized[:797].rstrip() + "..."

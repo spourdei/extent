@@ -113,6 +113,8 @@ _STOPWORDS = {
     "and",
     "are",
     "does",
+    "did",
+    "do",
     "for",
     "from",
     "have",
@@ -154,10 +156,12 @@ _EXPLICIT_COMPLETE_SCOPE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_STATE_QUESTION = re.compile(
-    r"\b(?:folder|files?|sources?)\b.{0,100}\b(?:available|complete|expected|found|"
-    r"incomplete|missing|ready|sync(?:ed|hronized)?)\b|"
-    r"\b(?:available|complete|expected|found|incomplete|missing|ready)\b.{0,100}"
-    r"\b(?:folder|files?|sources?)\b",
+    r"\b(?:documents?|folder|files?|sources?)\b.{0,100}\b(?:available|checked|complete|"
+    r"expected|found|incomplete|missing|processed|read|ready|unavailable|"
+    r"sync(?:ed|hronized)?)\b|"
+    r"\b(?:available|checked|complete|discovery|expected|found|incomplete|missing|"
+    r"processed|read|ready)\b.{0,100}"
+    r"\b(?:documents?|folder|files?|sources?)\b",
     re.IGNORECASE,
 )
 _RETRIEVAL_CANDIDATE_LIMIT = 32
@@ -196,13 +200,13 @@ _CONFLICT_SEEKING_QUESTION = re.compile(
     re.IGNORECASE,
 )
 _STRUCTURED_VALUE_QUESTION = re.compile(
-    r"^\s*(?:(?:what(?:'s|s|\s+(?:is|are|was|were))|"
+    r"^\s*(?:(?:what\b|what(?:'s|s|\s+(?:is|are|was|were))|"
     r"what\b.{1,60}\b(?:is|are|was|were)\s+"
     r"(?:listed|shown|recorded|provided)|"
     r"which\s+(?:is|are|was|were)|who\b|"
     r"where\s+(?:is|are|was|were)|"
     r"when(?:\s+(?:is|are|was|were))?|how\s+(?:much|many)|"
-    r"(?:show|give|tell)\s+(?:me\s+)?)\b)",
+    r"(?:provide|report|return|show|state|give|tell)\s+(?:me\s+)?)\b)",
     re.IGNORECASE,
 )
 _FIELD_SCOPE_PREPOSITION = re.compile(r"\b(?:at|for|from|in|of|on)\b", re.IGNORECASE)
@@ -407,6 +411,10 @@ class QueryService:
             ),
         )
         exhaustive_request = parse_exhaustive_request(execution_question)
+        if deterministic_plan.mode == "exhaustive" and isinstance(
+            deterministic_exhaustive_request, ExhaustiveRequest
+        ):
+            query_plan = deterministic_plan
 
         if source_state_question or _SOURCE_STATE_QUESTION.search(execution_question):
             stored = self._repository.store_publication_result(
@@ -939,6 +947,15 @@ class QueryService:
                 question=execution_question,
                 run_id=context.run_id,
             )
+            if plan.mode == "exhaustive" and isinstance(exhaustive_request, ExhaustiveRequest):
+                return self._extract_values(
+                    blocks=ready_blocks,
+                    context=context,
+                    idempotency_key=idempotency_key,
+                    now=now,
+                    question=display_question,
+                    request=exhaustive_request,
+                )
             # Complete-data execution remains authoritative after the model has
             # interpreted the question. Sampled retrieval cannot safely replace
             # a failed aggregate, exhaustive, grouped, or joined operation.
@@ -1056,7 +1073,7 @@ class QueryService:
             message = _incomplete_analysis_message(context, fallback=analysis.message)
         status = (
             "coverage_limited"
-            if gaps or not analysis.complete
+            if gaps or analysis.status == "incomplete"
             else "evidence_supported"
             if claims
             else "insufficient"
@@ -2218,7 +2235,8 @@ def _assignment_label_matches_query(
     if not label_tokens:
         return False
     return any(
-        _query_token_sequences_match(label_tokens, token_sequence)
+        len(token_sequence) <= len(label_tokens)
+        and _query_token_sequences_match(label_tokens[-len(token_sequence) :], token_sequence)
         for token_sequence in token_sequences
     )
 
@@ -2288,7 +2306,12 @@ def _query_assignment_token_sequences(
         if verb not in {"are", "did", "does", "has", "is", "was", "were"}:
             return ()
 
-    candidates: tuple[tuple[str, ...], ...] = _suffix_token_sequences(tokens)
+    contiguous = tuple(
+        tokens[start : start + width]
+        for width in range(min(4, len(tokens)), 1, -1)
+        for start in range(0, len(tokens) - width + 1)
+    )
+    candidates: tuple[tuple[str, ...], ...] = (*_suffix_token_sequences(tokens), *contiguous)
     scope_matches = list(_FIELD_SCOPE_PREPOSITION.finditer(question))
     non_of_scopes = [scope for scope in scope_matches if scope.group(0).casefold() != "of"]
     for scope in (*non_of_scopes, *scope_matches):
@@ -2701,9 +2724,14 @@ def _excerpt_span(
         narrowed_start = max(start, narrowed_end - excerpt_limit)
 
     if narrowed_start > start:
-        next_space = text.find(" ", narrowed_start, min(narrowed_start + 24, anchor_start))
-        if next_space >= 0:
-            narrowed_start = next_space + 1
+        sentence_boundary = text.rfind(". ", start, anchor_start)
+        if sentence_boundary >= start and anchor_end - (sentence_boundary + 2) <= excerpt_limit:
+            narrowed_start = sentence_boundary + 2
+            narrowed_end = min(end, narrowed_start + excerpt_limit)
+        else:
+            next_space = text.find(" ", narrowed_start, min(narrowed_start + 24, anchor_start))
+            if next_space >= 0:
+                narrowed_start = next_space + 1
     if narrowed_end < end:
         previous_space = text.rfind(" ", max(anchor_end, narrowed_end - 24), narrowed_end)
         if previous_space >= 0:

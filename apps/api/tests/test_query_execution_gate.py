@@ -333,7 +333,7 @@ def test_unsupported_structured_clause_stops_before_sampled_retrieval() -> None:
             workspace_id=WORKSPACE_ID,
         )
 
-    assert result.status == "coverage_limited"
+    assert result.status == "insufficient"
     assert result.claims == []
     assert result.policy_version == "structured-analysis-policy-v1"
     assert store.search_reads == 0

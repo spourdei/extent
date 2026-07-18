@@ -663,6 +663,12 @@ def _column_score(header: str, question: str) -> int:
         return 8 + len(header_key.split())
     header_tokens = normalized_query_tokens(header_key)
     question_tokens = normalized_query_tokens(question_key)
+    if (
+        len(header_tokens) >= 2
+        and header_tokens[-1] in {"id", "identifier"}
+        and any(tokens_equivalent(header_tokens[0], token) for token in question_tokens)
+    ):
+        return 12
     meaningful = [token for token in header_tokens if token not in _QUESTION_STOPWORDS]
     if not meaningful:
         return 0
@@ -680,6 +686,11 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
         for mention_span in _condition_mentions(table, column, normalized):
             tail = normalized[mention_span[1] : mention_span[1] + 160]
             prefix = normalized[max(0, mention_span[0] - 60) : mention_span[0]]
+            if re.match(
+                r"\s+(?:is|are)\s+in\s+(?:each|every)\s+",
+                tail,
+            ):
+                continue
             if re.search(
                 r"\b(?:aggregate|average|avg|count|maximum|max|minimum|min|sum|total)\b",
                 normalized,
@@ -806,6 +817,12 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
             if not row.values[column].is_null
         }
         for raw_key, typed in distinct.items():
+            if raw_key in _AGGREGATE_WORDS and re.search(
+                r"\b(?:aggregate|average|avg|count|how\s+many|maximum|max|minimum|min|"
+                r"sum|total)\b",
+                normalized,
+            ):
+                continue
             value_matches = list(re.finditer(rf"(?<!\w){re.escape(raw_key)}(?!\w)", normalized))
             if len(raw_key) >= 2 and any(
                 not any(
@@ -1207,13 +1224,17 @@ def _list_or_summarize(
             if not rendered:
                 malformed += 1
                 continue
+            condition_columns = {condition.column for condition in conditions}
             value_column = next(
                 (
-                    condition.column
-                    for condition in conditions
-                    if condition.column in valid_columns
+                    column
+                    for column in identity
+                    if column in valid_columns and column not in condition_columns
                 ),
-                valid_columns[0],
+                next(
+                    (column for column in valid_columns if column not in condition_columns),
+                    valid_columns[0],
+                ),
             )
             value = row.values[value_column].raw or "null"
             claims.append(
