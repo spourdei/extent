@@ -89,6 +89,13 @@ _AGGREGATE_WORDS = {
     "sum",
     "total",
 }
+_ROLLUP_GROUP_VALUES = {
+    "all",
+    "grand total",
+    "overall",
+    "subtotal",
+    "total",
+}
 _EXTREMA_ENTITY_QUESTION = re.compile(
     r"(?:\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b|"
     r"\b(?:identify|find|give|name|return|show)\b.{0,100})"
@@ -1050,6 +1057,8 @@ def _aggregate(
                 key = tuple(
                     row.values[group_index].raw for group_index in execution_plan.group_columns
                 )
+                if any(_normalized_text(value) in _ROLLUP_GROUP_VALUES for value in key):
+                    continue
                 groups[key].append(row)
         grouped_rows.extend(
             (execution_plan.group_columns, group, group_rows)
@@ -2027,18 +2036,6 @@ def _condition_validation_error(
     return None
 
 
-def _requested_metric_operations(question: str) -> tuple[AggregateOperation, ...]:
-    patterns: tuple[tuple[AggregateOperation, str], ...] = (
-        ("average", r"\b(?:average|avg|mean)\b"),
-        ("minimum", r"\b(?:lowest|minimum|min|smallest)\b"),
-        ("maximum", r"\b(?:highest|largest|maximum|max)\b"),
-        ("sum", r"\b(?:sum|total)\b"),
-    )
-    return tuple(
-        operation for operation, pattern in patterns if re.search(pattern, question, re.I)
-    )
-
-
 def _metric_operation_mentions(
     question: str,
 ) -> list[tuple[int, int, AggregateOperation]]:
@@ -2077,8 +2074,22 @@ def _aggregate_metrics(
     count_requested = (
         re.search(r"\b(?:count|how\s+many|number\s+of)\b", question, re.I) is not None
     )
-    operation_mentions = _metric_operation_mentions(question)
-    operations = _requested_metric_operations(question)
+    normalized = _normalized_text(question)
+    header_spans = tuple(
+        (match.start(), match.end())
+        for header in table.headers
+        if (header_key := _normalized_text(header))
+        for match in re.finditer(rf"\b{re.escape(header_key)}\b", normalized)
+    )
+    operation_mentions = [
+        mention
+        for mention in _metric_operation_mentions(question)
+        if not any(
+            header_start <= mention[0] and mention[1] <= header_end
+            for header_start, header_end in header_spans
+        )
+    ]
+    operations = tuple(dict.fromkeys(operation for _, _, operation in operation_mentions))
     if count_requested and not operation_mentions:
         mentioned_numeric = [
             column for column in mentioned_numeric if column not in condition_columns
@@ -2087,7 +2098,6 @@ def _aggregate_metrics(
     if count_requested:
         metrics.append(_Metric(column=None, operation="count"))
     if mentioned_numeric and operation_mentions:
-        normalized = _normalized_text(question)
         column_positions = {
             column: match.start()
             for column in mentioned_numeric
@@ -2126,7 +2136,7 @@ def _aggregate_metrics(
         elif unbound:
             return ()
     elif mentioned_numeric:
-        if count_requested:
+        if count_requested or group_columns:
             metrics.extend(
                 _Metric(column=column, operation="sum") for column in mentioned_numeric
             )
