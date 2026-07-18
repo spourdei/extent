@@ -759,7 +759,7 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
                         tail,
                     )
                     if (
-                        re.search(r"\b(?:where|with)\s+$", prefix)
+                        re.search(r"\b(?:from|where|with)\s+$", prefix)
                         or (conditions and re.search(r"\band\s+$", prefix))
                     )
                     else None

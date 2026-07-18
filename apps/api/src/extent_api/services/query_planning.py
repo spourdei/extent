@@ -178,6 +178,17 @@ def plan_query(question: str) -> QueryPlan:
         is None
     ):
         intents.add("filter")
+    if (
+        "list" in intents
+        and re.search(
+            r"\bfrom\s+(?!(?:(?:all|each|every|the)\s+)?"
+            r"(?:documents?|files?|folders?|sources?|workspace)\b).{1,80}",
+            normalized,
+            re.I,
+        )
+        is not None
+    ):
+        intents.add("filter")
     if _EXCEPTIONS.search(normalized):
         intents.add("exceptions")
     if _UNIVERSAL.search(normalized):
