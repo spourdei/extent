@@ -26,6 +26,7 @@ from extent_api.providers.embeddings import (
 )
 from extent_api.providers.google_drive import create_google_drive_provider
 from extent_api.providers.tesseract_ocr import TesseractPdfOcrProvider
+from extent_api.resource_limits import DEFAULT_MAX_SOURCE_BYTES
 from extent_api.security import CredentialDecryptionError, CredentialKeyring
 from extent_api.services.drive_discovery import discover_drive_folder
 from extent_api.services.drive_locator import DriveFolderLocator
@@ -209,6 +210,7 @@ def sync_folder(run_id: str) -> None:
                 provider,
                 parsed_run_id,
                 embedding_provider=_embedding_provider(settings),
+                max_source_bytes=settings.max_source_bytes,
                 ocr_provider=TesseractPdfOcrProvider(executable=settings.ocr_executable),
             )
             outcome = "completed"
@@ -250,6 +252,7 @@ def _process_queued_sources(
     run_id: UUID,
     *,
     embedding_provider: EmbeddingProvider | None,
+    max_source_bytes: int = DEFAULT_MAX_SOURCE_BYTES,
     ocr_provider: PdfOcrProvider | None = None,
 ) -> None:
     remaining_blocks = max(
@@ -260,6 +263,7 @@ def _process_queued_sources(
         provider,
         run_id,
         embedding_provider=embedding_provider,
+        max_source_bytes=max_source_bytes,
         ocr_provider=ocr_provider,
         remaining_blocks=remaining_blocks,
     )
@@ -287,6 +291,14 @@ def _process_queued_sources(
             )
             repository.commit()
             continue
+        if _source_exceeds_size_limit(source, maximum_bytes=max_source_bytes):
+            repository.cap_source(
+                source_file_id,
+                error_code="file_size_limit",
+                now=datetime.now(UTC),
+            )
+            repository.commit()
+            continue
         if source_format.ingestion_mode == "export_text":
             download = _export_text(
                 provider,
@@ -309,6 +321,14 @@ def _process_queued_sources(
                 error_code=download.code,
                 error_stage="download",
                 retryable=download.retryable,
+                now=datetime.now(UTC),
+            )
+            repository.commit()
+            continue
+        if len(download.content) > max_source_bytes:
+            repository.cap_source(
+                source_file_id,
+                error_code="file_size_limit",
                 now=datetime.now(UTC),
             )
             repository.commit()
@@ -375,6 +395,7 @@ def _process_queued_pdf_sources(
     run_id: UUID,
     *,
     embedding_provider: EmbeddingProvider | None,
+    max_source_bytes: int,
     ocr_provider: PdfOcrProvider | None = None,
     remaining_blocks: int,
 ) -> int:
@@ -409,6 +430,14 @@ def _process_queued_pdf_sources(
             )
             repository.commit()
             continue
+        if _source_exceeds_size_limit(source, maximum_bytes=max_source_bytes):
+            repository.cap_source(
+                source_file_id,
+                error_code="file_size_limit",
+                now=datetime.now(UTC),
+            )
+            repository.commit()
+            continue
         download = _download_binary(
             provider,
             BinaryDownloadRequest(
@@ -422,6 +451,14 @@ def _process_queued_pdf_sources(
                 error_code=download.code,
                 error_stage="download",
                 retryable=download.retryable,
+                now=datetime.now(UTC),
+            )
+            repository.commit()
+            continue
+        if len(download.content) > max_source_bytes:
+            repository.cap_source(
+                source_file_id,
+                error_code="file_size_limit",
                 now=datetime.now(UTC),
             )
             repository.commit()
@@ -465,6 +502,16 @@ def _process_queued_pdf_sources(
             continue
         remaining_blocks -= len(parsed.blocks)
     return remaining_blocks
+
+
+def _source_exceeds_size_limit(
+    source: SourceProcessingRecord,
+    *,
+    maximum_bytes: int,
+) -> bool:
+    if maximum_bytes < 1:
+        raise ValueError("maximum source bytes must be positive")
+    return source.size_bytes is not None and source.size_bytes > maximum_bytes
 
 
 def _parse_pdf_evidence(

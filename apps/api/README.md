@@ -41,8 +41,10 @@ artifacts, embedding, and ready transitions while projecting them into the bound
 queued, parsing, ready, failed, unsupported, and capped states. It extracts embedded PDF text and
 falls back to local, page-aware Tesseract OCR for image-only PDFs, exports Google Docs to plain
 text, parses comma-separated UTF-8 CSV rows, extracts DOCX body paragraphs and tables, parses
-bounded XLSX worksheets, and downloads plain text or Markdown without an application-level
-file-size limit. PDF page count is also uncapped for scalability testing. DOCX `document.xml` is
+bounded XLSX worksheets, and downloads plain text or Markdown. Every downloaded or exported
+source is capped at 25,000,000 bytes by default; known oversized Drive files are capped before
+download, and content with missing or inaccurate size metadata is checked again before parsing.
+PDF page count remains uncapped within that byte boundary. DOCX `document.xml` is
 capped at 20,000,000 uncompressed bytes to bound ZIP/XML parser memory. XLSX archives are capped
 at 20 sheets, 10,000 rows per sheet, 200 columns, and 50,000,000 total uncompressed bytes. CSV and
 XLSX rows remain searchable, while deterministic

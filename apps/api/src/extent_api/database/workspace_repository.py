@@ -57,6 +57,7 @@ class SourceProcessingRecord:
     mime_type: str
     name: str
     resource_key: str | None
+    size_bytes: int | None
     source_file_id: UUID
 
 
@@ -413,6 +414,7 @@ class WorkspaceRepository:
             mime_type=source.mime_type,
             name=source.name,
             resource_key=source.resource_key,
+            size_bytes=source.size_bytes,
             source_file_id=source.id,
         )
 
@@ -436,6 +438,7 @@ class WorkspaceRepository:
             mime_type=source.mime_type,
             name=source.name,
             resource_key=source.resource_key,
+            size_bytes=source.size_bytes,
             source_file_id=source.id,
         )
 

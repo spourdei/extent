@@ -266,6 +266,7 @@ Set these environment values on both services where applicable:
 | Answer-provider settings           | API key, OpenAI-compatible base URL, model name, and timeout               |
 | Embedding settings                 | API key, OpenAI-compatible base URL, and a 1,536-dimension-capable model   |
 | `EXTENT_QUERY_REQUESTS_PER_MINUTE` | `12` unless intentionally changed                                          |
+| `EXTENT_MAX_SOURCE_BYTES`          | `25000000` unless intentionally changed                                    |
 | `EXTENT_OCR_EXECUTABLE`            | Tesseract path or executable name on the worker                            |
 
 Production startup rejects missing credentials, loopback database or Redis URLs, non-HTTPS web
@@ -311,6 +312,7 @@ rules.
 | File types            | PDF, Google Docs, DOCX, XLSX, comma-separated UTF-8 CSV, TXT, and Markdown |
 | PDF text              | Embedded text first, then page-aware OCR when no usable text is found      |
 | Folder depth          | Up to 5 nested levels                                                      |
+| Individual file size  | Up to 25,000,000 bytes (25 MB) by default                                  |
 | Stored passages       | Up to 1,500 across one folder-reading run                                  |
 | DOCX                  | Body paragraphs and tables, with `document.xml` capped at 20,000,000 bytes |
 | XLSX                  | Up to 20 sheets, 10,000 rows per sheet, and 200 columns                    |

@@ -19,3 +19,12 @@ def test_database_settings_normalize_platform_connection_strings() -> None:
 def test_database_settings_reject_unsupported_drivers() -> None:
     with pytest.raises(ValidationError, match=r"postgresql\+psycopg"):
         Settings(database_url="sqlite:///extent.db")
+
+
+def test_source_size_limit_has_a_bounded_production_default() -> None:
+    assert Settings(_env_file=None).max_source_bytes == 25_000_000
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_source_bytes=999_999)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_source_bytes=100_000_001)

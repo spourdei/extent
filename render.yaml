@@ -19,6 +19,8 @@ projects:
                 value: extent_session
               - key: EXTENT_QUERY_REQUESTS_PER_MINUTE
                 value: 12
+              - key: EXTENT_MAX_SOURCE_BYTES
+                value: 25000000
               - key: EXTENT_MODEL_NAME
                 value: gemini-3.5-flash
               - key: EXTENT_EMBEDDING_MODEL

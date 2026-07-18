@@ -56,6 +56,8 @@ Configure these server-only values on both services where applicable:
   `dimensions` parameter; Extent requests and validates exactly 1,536 values
 - `EXTENT_QUERY_REQUESTS_PER_MINUTE=12`: atomic per-user question admission before provider
   work
+- `EXTENT_MAX_SOURCE_BYTES=25000000`: per-source download and parsing boundary; keep the same
+  value on the API and worker
 - `EXTENT_OCR_EXECUTABLE=tesseract`: worker-local OCR executable; worker startup fails when it
   is unavailable
 

@@ -482,7 +482,10 @@ export function adaptWorkspaceSources(
         folder,
         id: source.driveFileId,
         name: source.name,
-        state: "Not processed in this earlier folder run",
+        state:
+          source.errorCode === "file_size_limit" || source.reasonCode === "file_size_limit"
+            ? "This file is larger than the processing limit"
+            : "Not processed in this earlier folder run",
         tone: "danger",
       };
     }

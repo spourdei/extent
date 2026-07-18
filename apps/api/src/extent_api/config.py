@@ -9,6 +9,11 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from extent_api.resource_limits import (
+    DEFAULT_MAX_SOURCE_BYTES,
+    MAX_MAX_SOURCE_BYTES,
+    MIN_MAX_SOURCE_BYTES,
+)
 from extent_api.security import CredentialKeyring
 
 _EXACT_HOST = re.compile(
@@ -80,6 +85,11 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="text-embedding-3-large", min_length=1, max_length=160)
     model_timeout_seconds: int = Field(default=120, ge=10, le=180)
     ocr_executable: str = Field(default="tesseract", min_length=1, max_length=1_024)
+    max_source_bytes: int = Field(
+        default=DEFAULT_MAX_SOURCE_BYTES,
+        ge=MIN_MAX_SOURCE_BYTES,
+        le=MAX_MAX_SOURCE_BYTES,
+    )
     query_requests_per_minute: int = Field(default=12, ge=1, le=120)
     oauth_attempt_ttl_seconds: int = Field(default=600, ge=300, le=900)
     session_ttl_seconds: int = Field(default=604_800, ge=3_600, le=2_592_000)

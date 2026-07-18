@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import type { WorkspaceSource, WorkspaceView } from "../lib/types.ts";
+import { adaptWorkspaceSources } from "../lib/workspace-model.ts";
 import { workspaceNeedsPolling } from "../lib/workspace-polling.ts";
 import { readWorkspaceError, readWorkspaceView } from "../src/parse-workspace-view.ts";
 
@@ -77,6 +78,22 @@ test("accepts bounded workspace errors and rejects expanded payloads", () => {
   assert.equal(readWorkspaceError({ ...valid, providerPayload: "private" }), null);
   assert.equal(readWorkspaceError({ ...valid, code: "provider_error" }), null);
   assert.equal(readWorkspaceError({ ...valid, message: "x".repeat(281) }), null);
+});
+
+test("shows a specific visible reason when a source exceeds the file limit", () => {
+  const [file] = adaptWorkspaceSources([
+    {
+      ...readySource,
+      blockCount: 0,
+      errorCode: "file_size_limit",
+      pageCount: null,
+      status: "capped",
+    },
+  ]);
+
+  assert.ok(file);
+  assert.equal(file.state, "This file is larger than the processing limit");
+  assert.equal(file.tone, "danger");
 });
 
 test("settled ready and partial workspaces stop polling", () => {
