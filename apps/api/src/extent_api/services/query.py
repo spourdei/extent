@@ -230,9 +230,9 @@ _COMPARISON_FIELD_NOISE = {
     "disagree",
     "discrepancies",
     "discrepancy",
+    "do",
     "inconsistent",
     "mismatch",
-    "do",
     "resolved",
     "unresolved",
     "versus",
@@ -475,8 +475,13 @@ class QueryService:
         )
         exhaustive_request = parse_exhaustive_request(execution_question)
         if deterministic_complete_route:
-            execution_question = normalized_question
+            # Once the user's own wording unambiguously selects a complete-data
+            # capability, a model paraphrase must not invent an extra filter,
+            # join, grouping, or ordering clause.  Execute the recognized plan
+            # against the original question and keep model interpretation for
+            # genuinely ambiguous direct questions.
             query_plan = deterministic_plan
+            execution_question = normalized_question
             exhaustive_request = deterministic_exhaustive_request
 
         if source_state_question or _SOURCE_STATE_QUESTION.search(execution_question):
@@ -692,10 +697,14 @@ class QueryService:
             plan=query_plan,
         )
         try:
-            draft = self._answer_provider.generate(
-                history=model_history,
-                passages=_model_passages(passages),
-                question=generation_question,
+            draft = (
+                prepared_comparison_recovery
+                if prepared_comparison_recovery is not None
+                else self._answer_provider.generate(
+                    history=model_history,
+                    passages=_model_passages(passages),
+                    question=generation_question,
+                )
             )
         except ModelGenerationError as first_error:
             if prepared_comparison_recovery is not None:

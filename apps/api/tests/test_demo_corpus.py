@@ -327,7 +327,7 @@ def test_named_minimum_comparison_recovers_the_two_scoped_values() -> None:
         workspace_id=DEMO_WORKSPACE_ID,
     )
 
-    assert provider.calls == 1
+    assert provider.calls == 0
     assert result.status == "conflict"
     assert {citation.raw_value for citation in result.claims[0].citations} == {
         "USD 250,000",
@@ -339,7 +339,7 @@ def test_named_minimum_comparison_recovers_the_two_scoped_values() -> None:
     }
 
 
-def test_named_comparison_recovers_after_model_citations_fail_verification() -> None:
+def test_named_comparison_uses_verified_deterministic_reconciliation() -> None:
     provider = _UnverifiableComparisonProvider()
     service = QueryService(
         answer_provider=provider,
@@ -357,7 +357,7 @@ def test_named_comparison_recovers_after_model_citations_fail_verification() -> 
         workspace_id=DEMO_WORKSPACE_ID,
     )
 
-    assert provider.calls == 1
+    assert provider.calls == 0
     assert result.status == "conflict"
     assert {citation.raw_value for citation in result.claims[0].citations} == {
         "USD 250,000",
@@ -419,7 +419,7 @@ def test_broad_mismatch_question_retrieves_the_value_bearing_reconciliation_tabl
     )
 
 
-def test_broad_mismatch_recovers_each_corroborated_field_after_model_abstention() -> None:
+def test_broad_mismatch_recovers_each_corroborated_field_without_model_generation() -> None:
     provider = _EmptyAnswerProvider()
     service = QueryService(
         answer_provider=provider,
@@ -437,7 +437,7 @@ def test_broad_mismatch_recovers_each_corroborated_field_after_model_abstention(
         workspace_id=DEMO_WORKSPACE_ID,
     )
 
-    assert provider.calls == 1
+    assert provider.calls == 0
     assert result.status == "conflict"
     assert {claim.text for claim in result.claims} == {
         "Total annual package premium: USD 144,550 / USD 146,950",

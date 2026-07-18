@@ -89,9 +89,17 @@ _AGGREGATE_WORDS = {
     "sum",
     "total",
 }
+_ROLLUP_GROUP_VALUES = {
+    "all",
+    "grand total",
+    "overall",
+    "subtotal",
+    "total",
+}
 _EXTREMA_ENTITY_QUESTION = re.compile(
-    r"\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b.{0,40}"
-    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    r"(?:\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b|"
+    r"\b(?:identify|find|give|name|return|show)\b.{0,100})"
+    r".{0,40}\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
     re.I,
 )
 
@@ -678,17 +686,14 @@ def _column_score(header: str, question: str) -> int:
     meaningful = [token for token in header_tokens if token not in _QUESTION_STOPWORDS]
     if not meaningful:
         return 0
-    if meaningful[-1:] in (["id"], ["identifier"]) and len(meaningful) > 1:
-        entity_tokens = meaningful[:-1]
-        if all(
-            any(tokens_equivalent(token, candidate) for candidate in question_tokens)
-            for token in entity_tokens
-        ):
-            # Natural questions name the row entity ("claims", "locations")
-            # more often than its technical ``*_ID`` column.  Treat that noun as
-            # a weaker identity-column mention while preserving exact-header
-            # matches above.
-            return 2 + len(entity_tokens)
+    if (
+        len(header_tokens) >= 2
+        and header_tokens[-1] in {"id", "identifier"}
+        and any(tokens_equivalent(header_tokens[0], token) for token in question_tokens)
+    ):
+        # Natural questions often name the row entity ("claims", "locations")
+        # instead of its technical ``*_ID`` column.
+        return 12
     matched = sum(
         any(tokens_equivalent(token, candidate) for candidate in question_tokens)
         for token in meaningful
@@ -736,14 +741,16 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
                 break
             tail = re.sub(
                 r"^\s+(?:is|are)\s+(?=(?:above|after|at\s+(?:least|most)|before|below|"
-                r"greater|less|more|no\s+(?:earlier|later)|on\s+or|over|under)\b)",
+                r"exceed(?:s|ing)?|greater|less|more|no\s+(?:earlier|later)|"
+                r"on\s+or|over|under)\b)",
                 " ",
                 tail,
             )
             comparator = re.match(
                 r"\s*(?P<operator>>=|<=|!=|<>|=|>|<|on\s+or\s+after|"
                 r"on\s+or\s+before|no\s+earlier\s+than|no\s+later\s+than|"
-                r"is\s+not|not\s+equal\s+to|greater\s+than|more\s+than|over|"
+                r"is\s+not|not\s+equal\s+to|exceed(?:s|ing)?|greater\s+than|"
+                r"more\s+than|over|"
                 r"above|at\s+least|less\s+than|under|below|at\s+most|before|"
                 r"after|equals?|is|are)\s+"
                 r"(?P<value>[^?,;]+?)(?=\s+(?:and|by|grouped|per|where|with|"
@@ -758,7 +765,7 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
                         tail,
                     )
                     if (
-                        re.search(r"\b(?:where|with)\s+$", prefix)
+                        re.search(r"\b(?:from|where|with)\s+$", prefix)
                         or (conditions and re.search(r"\band\s+$", prefix))
                     )
                     else None
@@ -801,7 +808,7 @@ def _conditions(table: StructuredTable, question: str) -> tuple[_Condition, ...]
                 r"(?:(?:is|are)\s+)?"
                 r"(?P<operator>on\s+or\s+after|on\s+or\s+before|"
                 r"no\s+earlier\s+than|no\s+later\s+than|at\s+least|at\s+most|"
-                r"greater\s+than|more\s+than|less\s+than|after|before|over|"
+                r"exceed(?:s|ing)?|greater\s+than|more\s+than|less\s+than|after|before|over|"
                 r"under|above|below)\s+(?P<value>[^?,;]+?)"
                 r"(?=\s+(?:and|by|where|with|ordered|sorted|order|sort)\b|$)",
                 tail[comparator.end() :],
@@ -1056,6 +1063,8 @@ def _aggregate(
                 key = tuple(
                     row.values[group_index].raw for group_index in execution_plan.group_columns
                 )
+                if any(_normalized_text(value) in _ROLLUP_GROUP_VALUES for value in key):
+                    continue
                 groups[key].append(row)
         grouped_rows.extend(
             (execution_plan.group_columns, group, group_rows)
@@ -1627,7 +1636,7 @@ def _reconcile(
 def _join_projection_requested(question: str) -> bool:
     return (
         re.search(
-            r"\b(?:match|map)\s+(?:all|each|every)\b|"
+            r"\b(?:join|match|map)\s+(?:all|each|every)\b|"
             r"\b(?:list|show)\b.{0,80}\b(?:from|join|match|using|with)\b",
             question,
             re.I,
@@ -1643,7 +1652,7 @@ def _orient_join_projection_tables(
     question: str,
 ) -> tuple[StructuredTable, StructuredTable]:
     match = re.search(
-        r"\b(?:match|map|list|show)\s+(?:all|each|every)\s+"
+        r"\b(?:join|match|map|list|show)\s+(?:all|each|every)\s+"
         r"(?P<target>.+?)\s+(?:from|to|using|with)\b",
         question,
         re.I,
@@ -1999,7 +2008,7 @@ def _condition_validation_error(
     comparison_count = len(
         re.findall(
             r"\b(?:on\s+or\s+after|on\s+or\s+before|no\s+earlier\s+than|"
-            r"no\s+later\s+than|at\s+least|at\s+most|greater\s+than|"
+            r"no\s+later\s+than|at\s+least|at\s+most|exceed(?:s|ing)?|greater\s+than|"
             r"more\s+than|less\s+than|after|before|over|under|above|below)\b",
             normalized,
         )
@@ -2011,7 +2020,7 @@ def _condition_validation_error(
             re.findall(
                 rf"\b(?:and|where|with)\s+{re.escape(header_key)}\s+"
                 r"(?!(?:(?:is|are)\s+)?(?:on\s+or|no\s+(?:earlier|later)|at\s+"
-                r"(?:least|most)|greater|more|less|after|before|over|under|"
+                r"(?:least|most)|exceed(?:s|ing)?|greater|more|less|after|before|over|under|"
                 r"above|below)\b)",
                 normalized,
             )
@@ -2031,18 +2040,6 @@ def _condition_validation_error(
         if not compatible:
             return "a filter value is incompatible with the resolved field type."
     return None
-
-
-def _requested_metric_operations(question: str) -> tuple[AggregateOperation, ...]:
-    patterns: tuple[tuple[AggregateOperation, str], ...] = (
-        ("average", r"\b(?:average|avg|mean)\b"),
-        ("minimum", r"\b(?:lowest|minimum|min|smallest)\b"),
-        ("maximum", r"\b(?:highest|largest|maximum|max)\b"),
-        ("sum", r"\b(?:sum|total)\b"),
-    )
-    return tuple(
-        operation for operation, pattern in patterns if re.search(pattern, question, re.I)
-    )
 
 
 def _metric_operation_mentions(
@@ -2083,8 +2080,22 @@ def _aggregate_metrics(
     count_requested = (
         re.search(r"\b(?:count|how\s+many|number\s+of)\b", question, re.I) is not None
     )
-    operation_mentions = _metric_operation_mentions(question)
-    operations = _requested_metric_operations(question)
+    normalized = _normalized_text(question)
+    header_spans = tuple(
+        (match.start(), match.end())
+        for header in table.headers
+        if (header_key := _normalized_text(header))
+        for match in re.finditer(rf"\b{re.escape(header_key)}\b", normalized)
+    )
+    operation_mentions = [
+        mention
+        for mention in _metric_operation_mentions(question)
+        if not any(
+            header_start <= mention[0] and mention[1] <= header_end
+            for header_start, header_end in header_spans
+        )
+    ]
+    operations = tuple(dict.fromkeys(operation for _, _, operation in operation_mentions))
     if count_requested and not operation_mentions:
         mentioned_numeric = [
             column for column in mentioned_numeric if column not in condition_columns
@@ -2093,7 +2104,6 @@ def _aggregate_metrics(
     if count_requested:
         metrics.append(_Metric(column=None, operation="count"))
     if mentioned_numeric and operation_mentions:
-        normalized = _normalized_text(question)
         column_positions = {
             column: match.start()
             for column in mentioned_numeric
@@ -2132,7 +2142,7 @@ def _aggregate_metrics(
         elif unbound:
             return ()
     elif mentioned_numeric:
-        if count_requested:
+        if count_requested or group_columns:
             metrics.extend(
                 _Metric(column=column, operation="sum") for column in mentioned_numeric
             )
@@ -2425,7 +2435,17 @@ def _operator(value: str) -> Literal["eq", "ge", "gt", "le", "lt", "ne"]:
     normalized = " ".join(value.casefold().split())
     if normalized in {"!=", "<>", "is not", "not equal to"}:
         return "ne"
-    if normalized in {">", "greater than", "more than", "over", "above", "after"}:
+    if normalized in {
+        ">",
+        "exceed",
+        "exceeds",
+        "exceeding",
+        "greater than",
+        "more than",
+        "over",
+        "above",
+        "after",
+    }:
         return "gt"
     if normalized in {">=", "at least", "no earlier than", "on or after"}:
         return "ge"

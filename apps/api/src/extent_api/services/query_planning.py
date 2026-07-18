@@ -43,8 +43,9 @@ _EXTREMA = re.compile(
     re.I,
 )
 _EXTREMA_ENTITY = re.compile(
-    r"\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b.{0,40}"
-    r"\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+    r"(?:\b(?:what|which)\b.{0,80}\b(?:has|had|is|was)\b|"
+    r"\b(?:identify|find|give|name|return|show)\b.{0,100})"
+    r".{0,40}\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
     re.I,
 )
 _TOTAL = re.compile(r"\b(?:aggregate|total)\b", re.I)
@@ -57,14 +58,16 @@ _ORDER = re.compile(
     re.I,
 )
 _FILTER = re.compile(
-    r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
+    r"\b(?:above|after|at\s+(?:least|most)|before|below|except|excluding|"
+    r"exceed(?:s|ing)?|greater\s+than|less\s+than|more\s+than|"
     r"missing|not\s+equal|where|with(?:out)?)\b|"
     r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
     r"(?:<=|>=|!=|<>|<|>)",
     re.I,
 )
 _NON_WITH_FILTER = re.compile(
-    r"\b(?:after|before|below|except|excluding|greater\s+than|less\s+than|"
+    r"\b(?:above|after|at\s+(?:least|most)|before|below|except|excluding|"
+    r"exceed(?:s|ing)?|greater\s+than|less\s+than|more\s+than|"
     r"missing|not\s+equal|where|without)\b|"
     r"\b(?:over|under)\s+(?=(?:[$€£]|USD|CAD|EUR|GBP)?\s*\d)|"
     r"(?:<=|>=|!=|<>|<|>)",
@@ -85,7 +88,7 @@ _UNIVERSAL = re.compile(
     re.I,
 )
 _JOIN = re.compile(
-    r"\b(?:join|reconcile|cross[- ]?reference|unmatched|cardinality|"
+    r"\b(?:join|link|map|reconcile|cross[- ]?reference|unmatched|cardinality|"
     r"one[- ]to[- ]many|many[- ]to[- ]one)\b|"
     r"\bmatch\b.{0,120}\b(?:to|using|with)\b|"
     r"\b(?:compare|cross[- ]?reference|match|reconcile)\b.{0,80}"
@@ -164,8 +167,26 @@ def plan_query(question: str) -> QueryPlan:
     elif _GROUP.search(grouping_text) and "aggregate" in intents:
         intents.add("group")
     join_requested = _JOIN.search(normalized) is not None
-    if _FILTER.search(normalized) and (
-        not join_requested or _NON_WITH_FILTER.search(normalized)
+    if (
+        _FILTER.search(normalized)
+        and (not join_requested or _NON_WITH_FILTER.search(normalized))
+        and re.search(
+            r"\bwith\b.{0,60}\b(?:highest|largest|lowest|maximum|max|minimum|min|smallest)\b",
+            normalized,
+            re.I,
+        )
+        is None
+    ):
+        intents.add("filter")
+    if (
+        "list" in intents
+        and re.search(
+            r"\bfrom\s+(?!(?:(?:all|each|every|the)\s+)?"
+            r"(?:documents?|files?|folders?|sources?|workspace)\b).{1,80}",
+            normalized,
+            re.I,
+        )
+        is not None
     ):
         intents.add("filter")
     if _EXCEPTIONS.search(normalized):
@@ -189,16 +210,13 @@ def plan_query(question: str) -> QueryPlan:
     complete_intents = {
         "aggregate",
         "completeness",
+        "filter",
         "group",
         "join",
         "list",
         "order",
     }
     requires_complete_data = bool(intents & complete_intents)
-    if "filter" in intents and (
-        intents & {"aggregate", "list"} or _SET_NOUN.search(normalized)
-    ):
-        requires_complete_data = True
     if "exceptions" in intents and (
         _SET_NOUN.search(normalized)
         or "list" in intents
