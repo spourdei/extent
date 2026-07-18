@@ -19,6 +19,13 @@ def conservative_token_forms(token: str) -> frozenset[str]:
         ):
             forms.add(normalized[:-1])
         return frozenset(forms)
+    if normalized.endswith("ed") and len(normalized) > 4:
+        # Source labels and questions often alternate between a noun/base form
+        # and a regular participle (name/named, record/recorded, issue/issued).
+        # Keep both mechanical candidates; equivalence still requires an exact
+        # intersection rather than general-purpose fuzzy stemming.
+        forms.add(normalized[:-2])
+        forms.add(normalized[:-1])
     if normalized.endswith("ies") and len(normalized) > 4:
         forms.add(f"{normalized[:-3]}y")
         return frozenset(forms)

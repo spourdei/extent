@@ -18,6 +18,7 @@ from extent_api.services.publication import (
     ClaimDraft,
     DraftEvidenceRef,
 )
+from extent_api.token_forms import tokens_equivalent
 
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP_WORDS = frozenset(
@@ -92,6 +93,7 @@ class ResilientDemoAnswerProvider:
             return AnswerDraft(claims=[], summary="No matching sample evidence was found.")
         passage = max(passages, key=lambda candidate: _relevance(candidate, question=question))
         quote = passage.exact_quote.strip()
+        claim_text = _extractive_claim_text(quote, question=question)
         return AnswerDraft(
             claims=[
                 ClaimDraft(
@@ -106,21 +108,41 @@ class ResilientDemoAnswerProvider:
                         )
                     ],
                     relation="fact",
-                    text=quote,
+                    text=claim_text,
                 )
             ],
             summary="Answered directly from the best-matching prepared sample evidence.",
         )
 
 
-def _relevance(passage: ModelPassage, *, question: str) -> tuple[int, int]:
+def _relevance(passage: ModelPassage, *, question: str) -> tuple[int, int, int, int]:
     question_tokens = _tokens(question)
     quote_tokens = _tokens(passage.exact_quote)
     source_tokens = _tokens(passage.source_name)
     return (
-        3 * len(question_tokens & quote_tokens) + len(question_tokens & source_tokens),
+        3 * _token_overlap(question_tokens, quote_tokens)
+        + _token_overlap(question_tokens, source_tokens),
+        int("\t" in passage.exact_quote),
+        int(bool(quote_tokens - question_tokens)),
         -len(passage.exact_quote),
     )
+
+
+def _token_overlap(left: frozenset[str], right: frozenset[str]) -> int:
+    return sum(
+        any(tokens_equivalent(left_token, right_token) for right_token in right)
+        for left_token in left
+    )
+
+
+def _extractive_claim_text(quote: str, *, question: str) -> str:
+    cells = [" ".join(cell.split()) for cell in quote.split("\t")]
+    if len(cells) >= 2 and cells[0] and cells[1]:
+        question_tokens = _tokens(question)
+        label_tokens = _tokens(cells[0])
+        if _token_overlap(question_tokens, label_tokens) >= min(2, len(question_tokens)):
+            return f"{cells[0]}: {cells[1]}"
+    return quote
 
 
 def _tokens(value: str) -> frozenset[str]:
