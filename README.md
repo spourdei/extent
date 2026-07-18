@@ -3,7 +3,7 @@
 Connect a Google Drive folder, ask questions across its documents, and inspect the exact quotes
 behind each finding. Extent also shows when sources disagree or files could not be checked.
 
-![Extent prepared workspace showing a cited premium and its source location](docs/assets/extent-sample.jpg)
+<img width="1816" height="1018" alt="image" src="https://github.com/user-attachments/assets/00927faf-1160-4d14-ae5d-0d92f662b3e0" />
 
 ## What Extent does
 
